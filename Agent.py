@@ -1,8 +1,8 @@
 import json, socket
-
+# TCP connection between Python & Java
 def main():
     host = 'localhost'
-    port = 5000
+    port = 5001
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((host, port))
