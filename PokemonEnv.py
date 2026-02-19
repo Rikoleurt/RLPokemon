@@ -7,12 +7,9 @@ class PokemonEnv(gym.Env):
 
     def __init__(self):
         super().__init__()
-        # Define MDP?
 
     def reset(self, seed=None, options=None):
-        # How do I reset
         return None
 
     def step(self, action):
-        # What is a step?
         return None
