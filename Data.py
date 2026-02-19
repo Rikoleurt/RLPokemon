@@ -9,6 +9,8 @@ types = {"normal": 0, "fire": 1, "water": 2, "grass": 3, "electric": 4, "ice": 5
 # Status representation
 status = {"normal": 0, "KO": 1}
 
+locked_id = 255
+max_moves = 4
 # TCP connection between Python & Java
 def main():
     host = 'localhost'
@@ -23,9 +25,9 @@ def main():
                     line = line.strip()
                     if not line:
                         continue
-                    jsonObj = json.loads(line)
-                    print("Received : ", jsonObj)
-                    print(json_to_obs(jsonObj))
+                    json_obj = json.loads(line)
+                    print("Received : ", json_obj)
+                    print(json_to_obs(json_obj))
     except ConnectionRefusedError:
         print("Impossible to connect to server : Server unavailable")
     except KeyboardInterrupt:
@@ -47,7 +49,40 @@ def json_to_obs(msg: dict) -> np.ndarray:
     priority = 1.0 if msg.get("Priority", {}).get("name", False) else 0.0
     turn = float(msg.get("turn", 0))
 
-    return np.array([p_hp, p_type, p_status, o_hp, o_type, o_status, priority, turn])
+    opp_move_ids, action_mask, _ = extract_moves(msg)
+
+
+    return np.array(
+        [p_hp, p_type, p_status, o_hp, o_type, o_status, priority, turn] + opp_move_ids.tolist(),
+        dtype=np.float32
+    )
+
+def json_to_terminated(msg: dict) -> bool:
+    p_alive = msg["player_infos"].get("healthy_pokemons", 0) > 0
+    o_alive = msg["opponent_infos"].get("healthy_pokemons", 0) > 0
+    return (not p_alive) or (not o_alive)
+
+
+def extract_moves(msg: dict, maximum: int = max_moves, identification: int = locked_id):
+    o = msg["opponent_infos"]["opponent_team"][0]
+    attacks = o.get("attacks", [])
+
+    move_ids = np.full((maximum,), identification, dtype=np.int32)
+    action_mask = np.zeros((maximum,), dtype=np.int8)
+    move_names = [""] * maximum
+
+    for a in attacks:
+        slot = a.get("slot")
+        mid = a.get("id", identification)
+        name = a.get("name", "")
+
+        if isinstance(slot, int) and 0 <= slot < maximum:
+            move_ids[slot] = int(mid)
+            action_mask[slot] = 1
+            move_names[slot] = name
+
+    compact_names = [n for n, m in zip(move_names, action_mask) if m == 1]
+    return move_ids, action_mask, compact_names
 
 if __name__ == "__main__":
     main()
