@@ -3,18 +3,22 @@ from gymnasium import spaces
 import numpy as np
 import json, socket
 
-from Data import json_to_obs, json_to_terminated
+from Data import json_to_obs, json_to_terminated, json_to_action_mask
 
 
 class PokemonEnv(gym.Env):
-    def __init__(self, host="localhost", port=5001, max_turns=200):
+    metadata = {"render_modes": []}
+
+    def __init__(self, host="localhost", port=5001, max_turns=200, send_json_action=False):
         super().__init__()
         self.host = host
         self.port = port
         self.max_turns = max_turns
+        self.send_json_action = send_json_action  # False = "2\n", True = {"action":2}\n
 
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
-        self.action_space = spaces.Discrete(4)  # exemple: 4 attaques possibles
+        # obs = 32 floats (8 state + 24 moves)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(32,), dtype=np.float32)
+        self.action_space = spaces.Discrete(4)
 
         self.sock = None
         self.f = None
@@ -34,6 +38,14 @@ class PokemonEnv(gym.Env):
             if line:
                 return json.loads(line)
 
+    def _send_action(self, action: int):
+        action = int(action)
+        if self.send_json_action:
+            payload = {"action": action}
+            self.sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+        else:
+            self.sock.sendall((str(action) + "\n").encode("utf-8"))
+
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         if self.sock is None:
@@ -41,19 +53,20 @@ class PokemonEnv(gym.Env):
 
         self.turns = 0
 
-        # Selon ton protocole: soit le serveur envoie un état tout seul,
-        # soit tu dois envoyer une commande "RESET" ici.
         msg = self._recv_msg()
         obs = json_to_obs(msg)
-        info = {"raw": msg}
+
+        info = {
+            "raw": msg,
+            "action_mask": json_to_action_mask(msg),
+        }
         return obs, info
 
     def step(self, action):
-        # Selon ton protocole : tu dois envoyer l'action au serveur Java
-        # Exemple simple si ton serveur attend une ligne JSON :
-        payload = {"action": int(action)}
-        self.sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+        # envoyer action 0..3 au moteur Java
+        self._send_action(action)
 
+        # recevoir l'état suivant
         msg = self._recv_msg()
         obs = json_to_obs(msg)
 
@@ -61,18 +74,23 @@ class PokemonEnv(gym.Env):
         self.turns += 1
         truncated = self.turns >= self.max_turns
 
-        # Reward (exemple basique, à adapter)
+        # reward (comme ton code actuel)
         p = msg["player_infos"]["player_team"][0]
         o = msg["opponent_infos"]["opponent_team"][0]
-        reward = (1 - o["HP"]/o["maxHP"]) - (1 - p["HP"]/p["maxHP"])
+        reward = (1 - o["HP"] / max(1, o["maxHP"])) - (1 - p["HP"] / max(1, p["maxHP"]))
 
-        info = {"raw": msg}
+        info = {
+            "raw": msg,
+            "action_mask": json_to_action_mask(msg),
+        }
         return obs, float(reward), terminated, truncated, info
 
     def close(self):
         try:
-            if self.f: self.f.close()
-            if self.sock: self.sock.close()
+            if self.f:
+                self.f.close()
+            if self.sock:
+                self.sock.close()
         finally:
             self.f = None
             self.sock = None
