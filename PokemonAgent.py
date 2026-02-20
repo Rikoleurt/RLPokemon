@@ -9,14 +9,13 @@ from Data import json_to_obs, json_to_terminated, json_to_action_mask
 class PokemonEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, host="localhost", port=5001, max_turns=200, send_json_action=False):
+    def __init__(self, host="localhost", port=5001, max_turns=200):
         super().__init__()
         self.host = host
         self.port = port
         self.max_turns = max_turns
-        self.send_json_action = send_json_action  # False = "2\n", True = {"action":2}\n
 
-        # obs = 32 floats (8 state + 24 moves)
+        # obs = 32 (8 state + 24 moves)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(32,), dtype=np.float32)
         self.action_space = spaces.Discrete(4)
 
@@ -39,12 +38,8 @@ class PokemonEnv(gym.Env):
                 return json.loads(line)
 
     def _send_action(self, action: int):
-        action = int(action)
-        if self.send_json_action:
-            payload = {"action": action}
-            self.sock.sendall((json.dumps(payload) + "\n").encode("utf-8"))
-        else:
-            self.sock.sendall((str(action) + "\n").encode("utf-8"))
+        # Java attend juste "0\n", "1\n", ...
+        self.sock.sendall((str(int(action)) + "\n").encode("utf-8"))
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -53,6 +48,9 @@ class PokemonEnv(gym.Env):
 
         self.turns = 0
 
+        # IMPORTANT:
+        # Java envoie un premier state via sendState(initialState) au moment du start()
+        msg = self._recv_msg()
         msg = self._recv_msg()
         obs = json_to_obs(msg)
 
@@ -63,21 +61,23 @@ class PokemonEnv(gym.Env):
         return obs, info
 
     def step(self, action):
-        # envoyer action 0..3 au moteur Java
+        # 1) envoyer action au moteur Java (fightLoop2 attend ici)
         self._send_action(action)
 
-        # recevoir l'état suivant
+        # 2) recevoir l'état suivant (envoyé par le prochain sendStateWaitForAction ou le sendState final)
         msg = self._recv_msg()
         obs = json_to_obs(msg)
+        assert obs.shape == (32,)
 
         terminated = json_to_terminated(msg)
         self.turns += 1
         truncated = self.turns >= self.max_turns
 
-        # reward (comme ton code actuel)
-        p = msg["player_infos"]["player_team"][0]
-        o = msg["opponent_infos"]["opponent_team"][0]
-        reward = (1 - o["HP"] / max(1, o["maxHP"])) - (1 - p["HP"] / max(1, p["maxHP"]))
+        # reward simple
+        # Ici: on pénalise les dégâts subis par l’agent (opponent) et on récompense ceux infligés au player
+        p = msg["player_infos"]["player_team"][0]      # enemy
+        o = msg["opponent_infos"]["opponent_team"][0]  # agent
+        reward = (1 - p["HP"] / max(1, p["maxHP"])) - (1 - o["HP"] / max(1, o["maxHP"]))
 
         info = {
             "raw": msg,

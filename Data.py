@@ -1,6 +1,7 @@
 import json, socket
 import numpy as np
 
+
 # Type representation
 types = {"normal": 0, "fire": 1, "water": 2, "grass": 3, "electric": 4, "ice": 5, "fighting": 6,
          "poison": 7, "ground": 8, "flying": 9, "psychic": 10, "bug": 11, "rock": 12, "ghost": 13,
@@ -71,8 +72,10 @@ def json_to_agent_first(msg: dict) -> float:
     """
     Returns 1 if the agent has the priority else 0
     """
-    prio = msg.get("Priority", {}).get("name", "player")
-    return 1.0 if prio == "opponent" else 0.0
+    prio = msg.get("Priority", {}).get("name", "")
+    agent_name = msg.get("opponent_infos", {}).get("name", "opponent")
+    agent_first = 1.0 if prio == agent_name else 0.0
+    return agent_first
 
 
 def json_to_action_mask(msg: dict) -> np.ndarray:
