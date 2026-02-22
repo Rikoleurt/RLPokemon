@@ -48,9 +48,6 @@ class PokemonEnv(gym.Env):
 
         self.turns = 0
 
-        # IMPORTANT:
-        # Java envoie un premier state via sendState(initialState) au moment du start()
-        msg = self._recv_msg()
         msg = self._recv_msg()
         obs = json_to_obs(msg)
 
@@ -61,20 +58,19 @@ class PokemonEnv(gym.Env):
         return obs, info
 
     def step(self, action):
-        # 1) envoyer action au moteur Java (fightLoop2 attend ici)
+        # Send the action to Java engine
         self._send_action(action)
 
-        # 2) recevoir l'état suivant (envoyé par le prochain sendStateWaitForAction ou le sendState final)
+        # Receive next message from the Java engine
         msg = self._recv_msg()
-        obs = json_to_obs(msg)
+        obs = json_to_obs(msg) # Compute the observation from the JSON
         assert obs.shape == (32,)
 
-        terminated = json_to_terminated(msg)
+        terminated = json_to_terminated(msg) # Compute the termination of the training from the JSON
         self.turns += 1
         truncated = self.turns >= self.max_turns
 
-        # reward simple
-        # Ici: on pénalise les dégâts subis par l’agent (opponent) et on récompense ceux infligés au player
+        # Reward policy
         p = msg["player_infos"]["player_team"][0]      # enemy
         o = msg["opponent_infos"]["opponent_team"][0]  # agent
         reward = (1 - p["HP"] / max(1, p["maxHP"])) - (1 - o["HP"] / max(1, o["maxHP"]))
