@@ -3,7 +3,18 @@ from gymnasium import spaces
 import numpy as np
 import json, socket
 
-from Data import json_to_obs, json_to_terminated, json_to_action_mask
+from data import json_to_obs, json_to_terminated, json_to_action_mask
+
+
+def ko_points(p, o):
+    p_status = p["status"]
+    o_status = o["status"]
+    if p_status == "KO":
+        return -4
+    elif o_status == "KO":
+        return 4
+    else:
+        return 0
 
 
 class PokemonEnv(gym.Env):
@@ -23,6 +34,9 @@ class PokemonEnv(gym.Env):
         self.f = None
         self.turns = 0
 
+    def _send_cmd(self, cmd: str):
+        self.sock.sendall((cmd.strip() + "\n").encode("utf-8"))
+
     def _connect(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.connect((self.host, self.port))
@@ -38,23 +52,25 @@ class PokemonEnv(gym.Env):
                 return json.loads(line)
 
     def _send_action(self, action: int):
-        # Java attend juste "0\n", "1\n", ...
         self.sock.sendall((str(int(action)) + "\n").encode("utf-8"))
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        if self.sock is None:
+
+        first_reset = self.sock is None
+
+        if first_reset:
             self._connect()
+        else:
+            self._send_cmd("RESET")
+            print("RESET signal sent")
 
         self.turns = 0
 
         msg = self._recv_msg()
         obs = json_to_obs(msg)
 
-        info = {
-            "raw": msg,
-            "action_mask": json_to_action_mask(msg),
-        }
+        info = {"raw": msg, "action_mask": json_to_action_mask(msg)}
         return obs, info
 
     def step(self, action):
@@ -73,7 +89,8 @@ class PokemonEnv(gym.Env):
         # Reward policy
         p = msg["player_infos"]["player_team"][0]      # enemy
         o = msg["opponent_infos"]["opponent_team"][0]  # agent
-        reward = (1 - p["HP"] / max(1, p["maxHP"])) - (1 - o["HP"] / max(1, o["maxHP"]))
+
+        reward = p["HP"] / max(1, p["maxHP"]) + ko_points(o, p)
 
         info = {
             "raw": msg,
@@ -83,10 +100,19 @@ class PokemonEnv(gym.Env):
 
     def close(self):
         try:
-            if self.f:
-                self.f.close()
+            # Send DONE signal to Java before closing
             if self.sock:
-                self.sock.close()
+                self._send_cmd("DONE")
+                print("DONE signal sent")
+        except:
+            pass
         finally:
-            self.f = None
-            self.sock = None
+            try:
+                if self.f:
+                    self.f.close()
+                if self.sock:
+                    self.sock.close()
+            finally:
+                self.f = None
+                self.sock = None
+

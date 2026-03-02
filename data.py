@@ -49,24 +49,26 @@ def json_to_obs(msg: dict) -> np.ndarray:
     p_hp = p["HP"] / max(1, p["maxHP"])
     o_hp = o["HP"] / max(1, o["maxHP"])
 
-    p_type = types.get(p.get("type", "normal"), len(types))
-    o_type = types.get(o.get("type", "normal"), len(types))
+    if p_hp != 0 or o_hp != 0:
+        p_type = types.get(p.get("type", "normal"), len(types))
+        o_type = types.get(o.get("type", "normal"), len(types))
 
-    p_status = status.get(p.get("status", "normal"), 0)
-    o_status = status.get(o.get("status", "normal"), 0)
+        p_status = status.get(p.get("status", "normal"), 0)
+        o_status = status.get(o.get("status", "normal"), 0)
 
-    agent_first = json_to_agent_first(msg)
-    turn = float(msg.get("turn", 0))
+        agent_first = json_to_agent_first(msg)
+        turn = float(msg.get("turn", 0))
 
-    _, _, _, move_features = extract_moves(msg)
+        _, _, _, move_features = extract_moves(msg)
 
-    obs = np.array(
-        [o_hp, o_type, o_status, p_hp, p_type, p_status, agent_first, turn]
-        + move_features.flatten().tolist(),
-        dtype=np.float32
-    )
-    return obs
-
+        obs = np.array(
+            [o_hp, o_type, o_status, p_hp, p_type, p_status, agent_first, turn]
+            + move_features.flatten().tolist(),
+            dtype=np.float32
+        )
+        return obs
+    else:
+        return np.array([], dtype=np.float32)
 
 def json_to_agent_first(msg: dict) -> float:
     """
