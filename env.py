@@ -22,17 +22,28 @@ class PokemonEnv(gym.Env):
 
     def __init__(self, host="localhost", port=5001, max_turns=200):
         super().__init__()
+        self.current_action_mask = np.ones(4, dtype=bool)
         self.host = host
         self.port = port
         self.max_turns = max_turns
 
-        # obs = 32 (8 state + 24 moves)
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(32,), dtype=np.float32)
+        low = np.array(
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            + [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] * 4,
+            dtype=np.float32,
+        )
+        high = np.array(
+            [1.0, 18.0, 1.0, 1.0, 18.0, 1.0, 1.0, float(max_turns)]
+            + [255.0, 18.0, 2.0, 2.0, 1.0, 1.0] * 4,
+            dtype=np.float32,
+        )
+        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
         self.action_space = spaces.Discrete(4)
 
         self.sock = None
         self.f = None
         self.turns = 0
+        print("ACTION SPACE:", self.action_space)
 
     def _send_cmd(self, cmd: str):
         self.sock.sendall((cmd.strip() + "\n").encode("utf-8"))
@@ -57,50 +68,69 @@ class PokemonEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        first_reset = self.sock is None
-
-        if first_reset:
+        if self.sock is None:
             self._connect()
-        else:
+
+        if seed is None:
             self._send_cmd("RESET")
             print("RESET signal sent")
+        else:
+            self._send_cmd(f"RESET {int(seed)}")
+            print(f"RESET signal sent with seed {int(seed)}")
 
         self.turns = 0
 
         msg = self._recv_msg()
         obs = json_to_obs(msg)
+        assert obs.shape == (32,)
 
-        info = {"raw": msg, "action_mask": json_to_action_mask(msg)}
+        self.current_action_mask = json_to_action_mask(msg).astype(bool)
+        print("MASK AFTER RESET:", self.current_action_mask)
+
+        info = {"raw": msg, "action_mask": self.current_action_mask.copy()}
         return obs, info
 
     def step(self, action):
-        # Send the action to Java engine
+        action = int(action)
+
+        if not self.current_action_mask[action]:
+            raise ValueError(
+                f"Invalid action {action} with mask {self.current_action_mask}"
+            )
+
         self._send_action(action)
 
-        # Receive next message from the Java engine
         msg = self._recv_msg()
-        obs = json_to_obs(msg) # Compute the observation from the JSON
+        obs = json_to_obs(msg)
         assert obs.shape == (32,)
 
-        terminated = json_to_terminated(msg) # Compute the termination of the training from the JSON
+        terminated = json_to_terminated(msg)
         self.turns += 1
         truncated = self.turns >= self.max_turns
 
-        # Reward policy
-        p = msg["player_infos"]["player_team"][0]      # enemy
+        p = msg["player_infos"]["player_team"][0]      # player
         o = msg["opponent_infos"]["opponent_team"][0]  # agent
 
         reward = p["HP"] / max(1, p["maxHP"]) + ko_points(o, p)
 
+        # IMPORTANT: mise à jour du masque pour l'état suivant
+        self.current_action_mask = json_to_action_mask(msg).astype(bool)
+
         info = {
             "raw": msg,
-            "action_mask": json_to_action_mask(msg),
+            "action_mask": self.current_action_mask.copy(),
         }
+
+        print("ACTION SENT TO JAVA:", action)
+        print("NEW MASK:", self.current_action_mask)
+
         return obs, float(reward), terminated, truncated, info
+
+    def action_masks(self):
+        return self.current_action_mask
 
     def close(self):
         try:
-            # Send DONE signal to Java before closing
             if self.sock:
                 self._send_cmd("DONE")
                 print("DONE signal sent")
@@ -115,4 +145,3 @@ class PokemonEnv(gym.Env):
             finally:
                 self.f = None
                 self.sock = None
-

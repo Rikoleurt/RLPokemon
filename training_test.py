@@ -16,12 +16,12 @@ def train(num_episodes=10):
         truncated = False
 
         while not (terminated or truncated):
-            # Your RL agent would choose action here
-            # For now, using random valid action
             action_mask = info['action_mask']
             valid_actions = [i for i, valid in enumerate(action_mask) if valid]
             import random
-            action = random.choice(valid_actions) if valid_actions else 0
+
+            rng = random.Random(123)
+            action = rng.choice(valid_actions) if valid_actions else 0
 
             print(f"\nstep {step_count} sending action: {action}")
             obs, reward, terminated, truncated, info = env.step(action)
@@ -41,8 +41,8 @@ def train(num_episodes=10):
         print(f"\nfinished: {status} steps: {step_count} total_reward: {total_reward}")
 
     env.close()
-    print("\n=== Training Complete ===", )
+    print("\n=== Training Complete ===")
 
 
 if __name__ == "__main__":
-    train(num_episodes=3)
+    train(num_episodes=5)

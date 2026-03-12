@@ -92,14 +92,6 @@ def json_to_terminated(msg: dict) -> bool:
 
 
 def extract_moves(msg: dict, maximum: int = max_moves, identification: int = locked_id):
-    """
-    Extract the attacks of the agent.
-    attacks = [{"slot":0,"id":0,"name":"Tackle"}, ...]
-    Retourne:
-      - move_ids: (maximum,) int32, padding=identification
-      - action_mask: (maximum,) int8
-      - compact_names: list[str] des moves valides
-    """
     o = msg["opponent_infos"]["opponent_team"][0]
     attacks = o.get("attacks", [])
 
@@ -110,8 +102,7 @@ def extract_moves(msg: dict, maximum: int = max_moves, identification: int = loc
     # move_features: [id, type_id, mode_id, power_norm, precision_norm, pp_norm]
     move_features = np.zeros((maximum, 6), dtype=np.float32)
 
-    # padding explicite: id = locked_id pour les slots vides
-    move_features[:, 0] = float(identification)
+    move_features[:, 0] = float(identification) # Selecting all rows but only from the first column => move ids
 
     for a in attacks:
         slot = a.get("slot", None)
@@ -135,8 +126,8 @@ def extract_moves(msg: dict, maximum: int = max_moves, identification: int = loc
         max_pp = float(a.get("maxPP", 1.0))
         pp_norm = pp / max(1.0, max_pp)
 
-        power_norm = power / 150.0
-        precision_norm = precision / 100.0
+        power_norm = power / 150.0 # We can find attacks with power > 150; therefore, 150 is a good normalization number
+        precision_norm = precision / 100.0 # max precision is 100
 
         move_features[slot] = np.array(
             [float(mid), float(move_type), float(move_mode), power_norm, precision_norm, pp_norm],
