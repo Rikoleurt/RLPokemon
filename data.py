@@ -137,6 +137,18 @@ def extract_moves(msg: dict, maximum: int = max_moves, identification: int = loc
     compact_names = [n for n, m in zip(move_names, action_mask) if m == 1]
     return move_ids, action_mask, compact_names, move_features
 
+def get_attack_names(msg: dict, maximum: int = max_moves) -> list[str]:
+    o = msg["opponent_infos"]["opponent_team"][0]
+    attacks = o.get("attacks", [])
+
+    attack_names = [f"Attack {i}" for i in range(maximum)]
+
+    for a in attacks:
+        slot = a.get("slot", None)
+        if isinstance(slot, int) and 0 <= slot < maximum:
+            attack_names[slot] = a.get("name", f"Attack {slot}")
+
+    return attack_names
 
 if __name__ == "__main__":
     main()
