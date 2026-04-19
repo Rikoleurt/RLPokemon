@@ -1,11 +1,18 @@
-from gymnasium.utils.env_checker import check_env
-
+import numpy as np
 from env import PokemonEnv
 
 env = PokemonEnv(host="localhost", port=5001)
-# This will catch many common issues
-try:
-    check_env(env)
-    print("Environment passes all checks!")
-except Exception as e:
-    print(f"Environment has issues: {e}")
+
+obs, info = env.reset()
+done = False
+truncated = False
+
+while not done and not truncated:
+    mask = info["action_mask"]
+    valid_actions = np.flatnonzero(mask)
+    action = np.random.choice(valid_actions)
+
+    obs, reward, done, truncated, info = env.step(action)
+
+print("Masked rollout OK")
+env.close()

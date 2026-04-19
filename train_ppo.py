@@ -1,116 +1,365 @@
 import os
+import re
+from collections import Counter
+from math import ceil
+from pathlib import Path
+
 import gymnasium as gym
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from matplotlib.ticker import MaxNLocator
 from sb3_contrib import MaskablePPO
 from env import PokemonEnv
-from data import get_attack_names
 
-gym.register(
-    id="gymnasium_env/Pokemon-v0",
-    entry_point="env:PokemonEnv",
-    max_episode_steps=300,
-)
-
-MODEL_PATH = "/Users/condreajason/Repositories/RLPokemon/models/pikachu_salameche_duel2_ppo"
+MODEL_PATH = "/Users/condreajason/Repositories/RLPokemon/models/SEx4_ppo"
 TOTAL_TIMESTEPS = 100_000
 TB_LOG_NAME = "pokemon_run_1"
 PLOT_DIR = "/Users/condreajason/Repositories/RLPokemon/plots"
 
+def next_plot_path(plot_dir: str, base_name: str, ext: str = ".png") -> str:
+    plot_dir = Path(plot_dir)
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    first_candidate = plot_dir / f"{base_name}{ext}"
+    if not first_candidate.exists():
+        return str(first_candidate)
+
+    pattern = re.compile(rf"^{re.escape(base_name)}(\d+){re.escape(ext)}$")
+    max_id = 0
+
+    for path in plot_dir.glob(f"{base_name}*{ext}"):
+        match = pattern.match(path.name)
+        if match:
+            max_id = max(max_id, int(match.group(1)))
+        elif path.name == f"{base_name}{ext}":
+            max_id = max(max_id, 0)
+
+    return str(plot_dir / f"{base_name}{max_id + 1}{ext}")
+
+
+def cumulative_mean(values: np.ndarray) -> np.ndarray:
+    if values.size == 0:
+        return values
+    return np.cumsum(values) / np.arange(1, values.size + 1)
+
+
+def moving_pokemon_move_usage(env: PokemonEnv) -> dict[str, dict[str, list[float]]]:
+    histories = getattr(env, "episode_pokemon_move_name_counts_history", [])
+    if not histories:
+        return {}
+
+    pokemon_names = list(getattr(env, "pokemon_move_name_counts", {}).keys())
+    for episode_counts in histories:
+        for pokemon_name in episode_counts:
+            if pokemon_name not in pokemon_names:
+                pokemon_names.append(pokemon_name)
+
+    usage_by_pokemon = {}
+    for pokemon_name in pokemon_names:
+        move_names = sorted(
+            {
+                move_name
+                for episode_counts in histories
+                for move_name in episode_counts.get(pokemon_name, {}).keys()
+            }
+        )
+        if not move_names:
+            continue
+
+        move_usage = {move_name: [] for move_name in move_names}
+        for episode_idx in range(len(histories)):
+            start_idx = max(0, episode_idx + 1 - env.window_size)
+            window_counter = Counter()
+            for episode_counts in histories[start_idx:episode_idx + 1]:
+                window_counter.update(episode_counts.get(pokemon_name, {}))
+
+            total = sum(window_counter.values())
+            for move_name in move_names:
+                if total == 0:
+                    move_usage[move_name].append(np.nan)
+                else:
+                    move_usage[move_name].append(100.0 * window_counter.get(move_name, 0) / total)
+
+        usage_by_pokemon[pokemon_name] = move_usage
+
+    return usage_by_pokemon
+
+
+def annotate_bar(ax, bar, percentage: float, count: float) -> None:
+    if count <= 0:
+        return
+
+    label = f"{percentage:.1f}%\n{int(count)}"
+    x = bar.get_x() + bar.get_width() / 2
+
+    if percentage >= 12:
+        ax.text(x, percentage - 3, label, ha="center", va="top", color="white", fontsize=8)
+    else:
+        ax.text(x, percentage + 2, label, ha="center", va="bottom", color="#222222", fontsize=8)
+
+
+def plot_global_performance(env: PokemonEnv, plot_dir: str) -> None:
+    episodes = np.arange(1, len(env.winrate_history) + 1)
+    if episodes.size == 0:
+        return
+
+    path = next_plot_path(plot_dir, "performance_globale")
+    pokemon_usage = moving_pokemon_move_usage(env)
+    usage_rows = max(1, len(pokemon_usage))
+    total_rows = 2 + usage_rows
+
+    fig, axes = plt.subplots(
+        total_rows,
+        1,
+        figsize=(12, max(10, 3.4 * total_rows)),
+        squeeze=False,
+        sharex=True,
+    )
+    axes = axes.ravel()
+
+    axes[0].plot(episodes, env.winrate_history, label="Winrate cumulé", linewidth=1.8)
+    axes[0].plot(
+        episodes,
+        env.winrate_moving_history,
+        label=f"Winrate glissant ({env.window_size})",
+        linewidth=1.8,
+    )
+    axes[0].set_title("Taux de victoire")
+    axes[0].set_ylabel("%")
+    axes[0].set_ylim(0, 105)
+    axes[0].set_yticks(np.arange(0, 101, 20))
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend()
+
+    fight_lengths = np.asarray(env.fight_length_history, dtype=float)
+    if fight_lengths.size:
+        fight_episodes = episodes[:fight_lengths.size]
+        axes[1].scatter(
+            fight_episodes,
+            fight_lengths,
+            s=10,
+            alpha=0.25,
+            label="Longueur observée",
+        )
+        axes[1].plot(
+            fight_episodes,
+            env.fight_length_moving_history[:fight_lengths.size],
+            label=f"Moyenne glissante ({env.window_size})",
+            linewidth=2.0,
+            color="#f28e2b",
+        )
+        axes[1].plot(
+            fight_episodes,
+            cumulative_mean(fight_lengths),
+            label="Moyenne cumulée",
+            linewidth=1.8,
+            color="#59a14f",
+        )
+        y_min = float(np.min(fight_lengths))
+        y_max = float(np.max(fight_lengths))
+        padding = max(1.0, (y_max - y_min) * 0.08)
+        axes[1].set_ylim(max(0.0, y_min - padding), y_max + padding)
+        axes[1].yaxis.set_major_locator(MaxNLocator(integer=True))
+    else:
+        axes[1].text(0.5, 0.5, "Aucune donnée", ha="center", va="center")
+
+    axes[1].set_title("Longueur des combats")
+    axes[1].set_ylabel("Tours")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend()
+
+    usage_axes = axes[2:]
+    if pokemon_usage:
+        for ax, (pokemon_name, move_usage) in zip(usage_axes, pokemon_usage.items()):
+            for move_name, usage in move_usage.items():
+                ax.plot(
+                    episodes[:len(usage)],
+                    usage,
+                    label=move_name,
+                    linewidth=1.8,
+                )
+            ax.set_title(f"Usage glissant des attaques - {pokemon_name}")
+            ax.set_ylabel("% des actions")
+            ax.set_ylim(0, 105)
+            ax.set_yticks(np.arange(0, 101, 20))
+            ax.grid(True, alpha=0.3)
+            ax.legend(ncol=min(2, len(move_usage)), fontsize="small")
+    else:
+        usage_axes[0].set_title("Usage glissant des attaques par Pokémon")
+        usage_axes[0].text(0.5, 0.5, "Aucune donnée par Pokémon", ha="center", va="center")
+        usage_axes[0].set_ylabel("%")
+        usage_axes[0].grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel("Episodes")
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Graph saved: {path}")
+
+
+def plot_pokemon_behavior(env: PokemonEnv, plot_dir: str) -> None:
+    if not env.pokemon_move_name_counts:
+        return
+
+    path = next_plot_path(plot_dir, "comportement_par_pokemon")
+    pokemon_names = list(env.pokemon_move_name_counts.keys())
+    all_move_names = sorted({
+        move_name
+        for counter in env.pokemon_move_name_counts.values()
+        for move_name in counter.keys()
+    })
+    color_map = plt.get_cmap("tab10")
+    move_colors = {
+        move_name: color_map(i % color_map.N)
+        for i, move_name in enumerate(all_move_names)
+    }
+
+    cols = min(2, len(pokemon_names))
+    rows = ceil(len(pokemon_names) / cols)
+    fig, axes = plt.subplots(rows, cols, figsize=(7 * cols, 4.5 * rows), squeeze=False)
+    axes = axes.ravel()
+
+    for ax, pokemon_name in zip(axes, pokemon_names):
+        counter = env.pokemon_move_name_counts[pokemon_name]
+        move_names = sorted(counter.keys())
+        counts = np.asarray([counter[move_name] for move_name in move_names], dtype=float)
+        total = float(np.sum(counts))
+        percentages = 100.0 * counts / max(1.0, total)
+        x = np.arange(len(move_names))
+
+        bars = ax.bar(
+            x,
+            percentages,
+            color=[move_colors[move_name] for move_name in move_names],
+        )
+
+        for bar, percentage, count in zip(bars, percentages, counts):
+            annotate_bar(ax, bar, percentage, count)
+
+        ax.set_title(f"{pokemon_name} ({int(total)} actions)")
+        ax.set_ylabel("% d'utilisation")
+        ax.set_ylim(0, 105)
+        ax.set_yticks(np.arange(0, 101, 20))
+        ax.set_xticks(x)
+        ax.set_xticklabels(move_names, rotation=30, ha="right")
+        ax.grid(True, axis="y", alpha=0.3)
+
+    for ax in axes[len(pokemon_names):]:
+        ax.axis("off")
+
+    fig.suptitle("Fréquence d’utilisation des attaques par Pokémon", y=0.995)
+
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Graph saved: {path}")
+
+
+def plot_tactical_understanding(env: PokemonEnv, plot_dir: str) -> None:
+    path = next_plot_path(plot_dir, "comprehension_tactique")
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 12))
+
+    labels = ["super efficace", "neutre", "peu efficace"]
+    keys = ["super", "neutral", "not_very"]
+    values = [env.effectiveness_counts[k] for k in keys]
+    effectiveness_colors = ["#4e9f3d", "#8f8f8f", "#d95f02"]
+
+    axes[0].bar(labels, values, color=effectiveness_colors)
+    axes[0].set_title("Fréquence super efficace / neutre / pas très efficace")
+    axes[0].set_ylabel("Nombre d'actions")
+    axes[0].grid(True, axis="y", alpha=0.3)
+
+    if env.matchup_move_name_counts:
+        matchup_names = list(env.matchup_move_name_counts.keys())
+        all_move_names = sorted({
+            move_name
+            for counter in env.matchup_move_name_counts.values()
+            for move_name in counter.keys()
+        })
+
+        matrix = np.array(
+            [
+                [env.matchup_move_name_counts[matchup].get(move_name, 0) for move_name in all_move_names]
+                for matchup in matchup_names
+            ],
+            dtype=float,
+        )
+
+        usage_cmap = mcolors.LinearSegmentedColormap.from_list(
+            "usage_blue_orange_red",
+            ["#2166ac", "#fdae61", "#b2182b"],
+        )
+        norm = mcolors.Normalize(vmin=0.0, vmax=max(1.0, float(np.max(matrix))))
+
+        im = axes[1].imshow(matrix, aspect="auto", cmap=usage_cmap, norm=norm)
+        axes[1].set_title("Utilisation des attaques par matchup")
+        axes[1].set_xlabel("Attaque")
+        axes[1].set_ylabel("Matchup")
+        axes[1].set_xticks(np.arange(len(all_move_names)))
+        axes[1].set_xticklabels(all_move_names, rotation=45, ha="right")
+        axes[1].set_yticks(np.arange(len(matchup_names)))
+        axes[1].set_yticklabels(matchup_names)
+
+        if matrix.size <= 80:
+            for row_idx in range(matrix.shape[0]):
+                for col_idx in range(matrix.shape[1]):
+                    value = matrix[row_idx, col_idx]
+                    normalized = norm(value)
+                    text_color = "white" if normalized < 0.25 or normalized > 0.72 else "#222222"
+                    axes[1].text(
+                        col_idx,
+                        row_idx,
+                        f"{int(value)}",
+                        ha="center",
+                        va="center",
+                        color=text_color,
+                        fontsize=8,
+                    )
+
+        colorbar = fig.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
+        colorbar.set_label("Nombre d'utilisations")
+    else:
+        axes[1].set_title("Utilisation des attaques par matchup")
+        axes[1].text(0.5, 0.5, "Aucune donnée", ha="center", va="center")
+        axes[1].axis("off")
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Graph saved: {path}")
 
 def plot(env: PokemonEnv, plot_dir: str = PLOT_DIR) -> None:
-    """
-    Save cumulative and moving attack usage / win rate plots collected during training.
-    """
-
     os.makedirs(plot_dir, exist_ok=True)
+    plot_global_performance(env, plot_dir)
+    plot_pokemon_behavior(env, plot_dir)
+    plot_tactical_understanding(env, plot_dir)
 
-    episodes = np.arange(1, len(env.winrate_history) + 1)
 
-    attack_usage_path = os.path.join(plot_dir, "attack_usage_cumulative.png")
-    attack_usage_moving_path = os.path.join(plot_dir, "attack_usage_moving.png")
-    winrate_path = os.path.join(plot_dir, "winrate_cumulative.png")
-    winrate_moving_path = os.path.join(plot_dir, "winrate_moving.png")
+def main() -> None:
+    gym.register(
+        id="gymnasium_env/Pokemon-v0",
+        entry_point="env:PokemonEnv",
+        max_episode_steps=300,
+    )
 
-    attack_labels = [f"Attack {i}" for i in range(4)]
-    if env.last_msg is not None:
-        attack_labels = get_attack_names(env.last_msg)
-
-    plt.figure(figsize=(10, 6))
-    for action_id in range(4):
-        plt.plot(
-            episodes,
-            env.attack_usage_history[action_id],
-            label=attack_labels[action_id],
+    env = PokemonEnv()
+    try:
+        model = MaskablePPO(
+            "MlpPolicy",
+            env,
+            verbose=1,
+            tensorboard_log="./tensorboard_logs/",
         )
-    plt.xlabel("Episodes")
-    plt.ylabel("Cumulative usage (%)")
-    plt.title("Attack usage over episodes")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(attack_usage_path, dpi=200, bbox_inches="tight")
-    plt.close()
 
-    # Usage glissant
-    plt.figure(figsize=(10, 6))
-    for action_id in range(4):
-        plt.plot(
-            episodes,
-            env.attack_usage_moving_history[action_id],
-            label=attack_labels[action_id],
-        )
-    plt.xlabel("Episodes")
-    plt.ylabel(f"Moving usage over last {env.window_size} episodes (%)")
-    plt.title("Moving attack usage over episodes")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(attack_usage_moving_path, dpi=200, bbox_inches="tight")
-    plt.close()
-
-    # Winrate cumulé
-    plt.figure(figsize=(10, 6))
-    plt.plot(episodes, env.winrate_history, label="Win rate")
-    plt.xlabel("Episodes")
-    plt.ylabel("Cumulative win rate (%)")
-    plt.title("Win rate over episodes")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(winrate_path, dpi=200, bbox_inches="tight")
-    plt.close()
-
-    # Winrate glissant
-    plt.figure(figsize=(10, 6))
-    plt.plot(episodes, env.winrate_moving_history, label="Moving win rate")
-    plt.xlabel("Episodes")
-    plt.ylabel(f"Moving win rate over last {env.window_size} episodes (%)")
-    plt.title("Moving win rate over episodes")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(winrate_moving_path, dpi=200, bbox_inches="tight")
-    plt.close()
-
-    print(f"Graph saved: {attack_usage_path}")
-    print(f"Graph saved: {attack_usage_moving_path}")
-    print(f"Graph saved: {winrate_path}")
-    print(f"Graph saved: {winrate_moving_path}")
+        model.learn(total_timesteps=TOTAL_TIMESTEPS, tb_log_name=TB_LOG_NAME)
+        model.save(MODEL_PATH)
+        plot(env)
+    finally:
+        env.close()
 
 
 if __name__ == "__main__":
-    env = PokemonEnv()
-
-    model = MaskablePPO(
-        "MlpPolicy",
-        env,
-        verbose=1,
-        tensorboard_log="./tensorboard_logs/",
-    )
-
-    model.learn(total_timesteps=TOTAL_TIMESTEPS, tb_log_name=TB_LOG_NAME)
-    model.save(MODEL_PATH)
-
-    plot(env)
-    env.close()
+    main()

@@ -2,29 +2,41 @@ import json, socket
 import numpy as np
 
 
-# Type representation
-types = {"normal": 0, "fire": 1, "water": 2, "grass": 3, "electric": 4, "ice": 5, "fighting": 6,
-         "poison": 7, "ground": 8, "flying": 9, "psychic": 10, "bug": 11, "rock": 12, "ghost": 13,
-         "dragon": 14, "dark": 15, "steel": 16, "fairy": 17}
+types = {
+    "normal": 0, "fire": 1, "water": 2, "grass": 3, "electric": 4, "ice": 5,
+    "fighting": 6, "poison": 7, "ground": 8, "flying": 9, "psychic": 10,
+    "bug": 11, "rock": 12, "ghost": 13, "dragon": 14, "dark": 15,
+    "steel": 16, "fairy": 17
+}
 
-# Mode representation
 modes = {"physical": 0, "special": 1, "status": 2}
 
-# Status representation
-status = {"normal": 0, "KO": 1}
+status = {
+    "normal": 0,
+    "KO": 1,
+    "burned": 2,
+    "paralyzed": 3,
+    "freeze": 4,
+    "asleep": 5,
+    "poisoned": 6,
+    "badlyPoisoned": 7,
+    "confused": 8,
+    "attracted": 9,
+    "cursed": 10,
+}
 
 locked_id = 255
 max_moves = 4
 
-# TCP connection between Python & Java
+
 def main():
-    host = 'localhost'
+    host = "localhost"
     port = 5001
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((host, port))
             print("Connected to server")
-            f = s.makefile('r', encoding='utf-8')
+            f = s.makefile("r", encoding="utf-8")
             while True:
                 for line in f:
                     line = line.strip()
@@ -33,7 +45,6 @@ def main():
                     json_obj = json.loads(line)
                     print("Received : ", json_obj)
                     print(json_to_obs(json_obj))
-
     except ConnectionRefusedError:
         print("Impossible to connect to server : Server unavailable")
     except ConnectionResetError:
@@ -42,42 +53,85 @@ def main():
         print("Closing python client")
 
 
+def type_id(value: str | None) -> float:
+    if value is None:
+        return float(len(types))
+    return float(types.get(str(value).lower(), len(types)))
+
+
+def status_id(value: str | None) -> float:
+    if value is None:
+        return 0.0
+    return float(status.get(str(value), 0))
+
+
+def stat_norm(value: float, denom: float = 255.0) -> float:
+    return float(value) / denom
+
+
+def pokemon_features(pokemon: dict | None) -> list[float]:
+    if pokemon is None:
+        return [
+            0.0,                         # hp_ratio
+            type_id("normal"),           # type1
+            type_id(None),               # type2
+            status_id("KO"),             # status
+            0.0, 0.0, 0.0, 0.0, 0.0      # atk, def, atkSpe, defSpe, speed
+        ]
+
+    hp = float(pokemon.get("HP", 0.0))
+    max_hp = float(max(1.0, pokemon.get("maxHP", 1.0)))
+
+    stats = pokemon.get("stats", {})
+    atk = stat_norm(stats.get("atk", pokemon.get("atk", 0.0)))
+    defe = stat_norm(stats.get("def", pokemon.get("def", 0.0)))
+    atk_spe = stat_norm(stats.get("atkSpe", pokemon.get("atkSpe", 0.0)))
+    def_spe = stat_norm(stats.get("defSpe", pokemon.get("defSpe", 0.0)))
+    speed = stat_norm(stats.get("speed", pokemon.get("speed", 0.0)))
+
+    return [
+        hp / max_hp,
+        type_id(pokemon.get("type", "normal")),
+        type_id(pokemon.get("type2")),
+        status_id(pokemon.get("status", "normal")),
+        atk,
+        defe,
+        atk_spe,
+        def_spe,
+        speed,
+    ]
+
+
 def json_to_obs(msg: dict) -> np.ndarray:
-    p = msg["player_infos"]["player_team"][0]      # enemy
-    o = msg["opponent_infos"]["opponent_team"][0]  # agent
+    p_front = msg["player_infos"]["player_team"][0]
 
-    p_hp = p["HP"] / max(1, p["maxHP"])
-    o_hp = o["HP"] / max(1, o["maxHP"])
+    o_team = msg["opponent_infos"]["opponent_team"]
+    o_front = o_team[0]
+    o_back = o_team[1] if len(o_team) > 1 and o_team[1] is not None else None
 
-    if p_hp != 0 or o_hp != 0:
-        p_type = types.get(p.get("type", "normal"), len(types))
-        o_type = types.get(o.get("type", "normal"), len(types))
+    agent_first = json_to_agent_first(msg)
+    turn = float(msg.get("turn", 0))
+    enemy_healthy = float(msg["player_infos"].get("healthy_pokemons", 0))
+    agent_healthy = float(msg["opponent_infos"].get("healthy_pokemons", 0))
 
-        p_status = status.get(p.get("status", "normal"), 0)
-        o_status = status.get(o.get("status", "normal"), 0)
+    _, _, _, move_features = extract_moves(msg)
 
-        agent_first = json_to_agent_first(msg)
-        turn = float(msg.get("turn", 0))
+    obs = np.array(
+        pokemon_features(p_front)
+        + pokemon_features(o_front)
+        + pokemon_features(o_back)
+        + [agent_first, turn, enemy_healthy, agent_healthy]
+        + move_features.flatten().tolist(),
+        dtype=np.float32
+    )
 
-        _, _, _, move_features = extract_moves(msg)
+    return obs
 
-        obs = np.array(
-            [o_hp, o_type, o_status, p_hp, p_type, p_status, agent_first, turn]
-            + move_features.flatten().tolist(),
-            dtype=np.float32
-        )
-        return obs
-    else:
-        return np.array([], dtype=np.float32)
 
 def json_to_agent_first(msg: dict) -> float:
-    """
-    Returns 1 if the agent has the priority else 0
-    """
     prio = msg.get("Priority", {}).get("name", "")
     agent_name = msg.get("opponent_infos", {}).get("name", "opponent")
-    agent_first = 1.0 if prio == agent_name else 0.0
-    return agent_first
+    return 1.0 if prio == agent_name else 0.0
 
 
 def json_to_action_mask(msg: dict) -> np.ndarray:
@@ -99,10 +153,9 @@ def extract_moves(msg: dict, maximum: int = max_moves, identification: int = loc
     action_mask = np.zeros((maximum,), dtype=np.int8)
     move_names = [""] * maximum
 
-    # move_features: [id, type_id, mode_id, power_norm, precision_norm, pp_norm]
-    move_features = np.zeros((maximum, 6), dtype=np.float32)
-
-    move_features[:, 0] = float(identification) # Selecting all rows but only from the first column => move ids
+    # [id, type_id, mode_id, power_norm, precision_norm, pp_norm, is_stab]
+    move_features = np.zeros((maximum, 7), dtype=np.float32)
+    move_features[:, 0] = float(identification)
 
     for a in attacks:
         slot = a.get("slot", None)
@@ -113,10 +166,9 @@ def extract_moves(msg: dict, maximum: int = max_moves, identification: int = loc
         name = a.get("name", "")
 
         move_ids[slot] = mid
-        action_mask[slot] = 1
         move_names[slot] = name
 
-        move_type = types.get(a.get("type", "normal"), len(types))
+        move_type = types.get(str(a.get("type", "normal")).lower(), len(types))
         move_mode = modes.get(str(a.get("Mode", "status")).lower(), 2)
 
         power = float(a.get("Power", 0.0))
@@ -126,16 +178,21 @@ def extract_moves(msg: dict, maximum: int = max_moves, identification: int = loc
         max_pp = float(a.get("maxPP", 1.0))
         pp_norm = pp / max(1.0, max_pp)
 
-        power_norm = power / 150.0 # We can find attacks with power > 150; therefore, 150 is a good normalization number
-        precision_norm = precision / 100.0 # max precision is 100
+        power_norm = power / 150.0
+        precision_norm = precision / 100.0
+        is_stab = 1.0 if a.get("isSTAB", False) else 0.0
 
         move_features[slot] = np.array(
-            [float(mid), float(move_type), float(move_mode), power_norm, precision_norm, pp_norm],
+            [float(mid), float(move_type), float(move_mode), power_norm, precision_norm, pp_norm, is_stab],
             dtype=np.float32
         )
 
+        # masque = seulement si PP > 0
+        action_mask[slot] = 1 if pp > 0 else 0
+
     compact_names = [n for n, m in zip(move_names, action_mask) if m == 1]
     return move_ids, action_mask, compact_names, move_features
+
 
 def get_attack_names(msg: dict, maximum: int = max_moves) -> list[str]:
     o = msg["opponent_infos"]["opponent_team"][0]
@@ -149,6 +206,7 @@ def get_attack_names(msg: dict, maximum: int = max_moves) -> list[str]:
             attack_names[slot] = a.get("name", f"Attack {slot}")
 
     return attack_names
+
 
 if __name__ == "__main__":
     main()
