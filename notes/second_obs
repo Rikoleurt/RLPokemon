@@ -1,0 +1,26 @@
+37 features :
+
+Bloc Pokémon
+
+enemy_front_hp
+enemy_front_type
+enemy_front_status
+agent_front_hp
+agent_front_type
+agent_front_status
+agent_back_hp
+agent_back_type
+agent_back_status
+
+Bloc contexte
+
+agent_first
+turn
+enemy_healthy_pokemons
+agent_healthy_pokemons
+Bloc attaques du front de l’agent
+
+14–19. attaque 0
+20–25. attaque 1
+26–31. attaque 2
+32–37. attaque 3

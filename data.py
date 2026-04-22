@@ -1,6 +1,6 @@
-import json, socket
+import json
+import socket
 import numpy as np
-
 
 types = {
     "normal": 0, "fire": 1, "water": 2, "grass": 3, "electric": 4, "ice": 5,
@@ -43,8 +43,10 @@ def main():
                     if not line:
                         continue
                     json_obj = json.loads(line)
-                    print("Received : ", json_obj)
+                    print("Received :", json_obj)
                     print(json_to_obs(json_obj))
+                    print("Mask:", json_to_action_mask(json_obj))
+                    print("Invalid:", json_obj.get("action_feedback", {}))
     except ConnectionRefusedError:
         print("Impossible to connect to server : Server unavailable")
     except ConnectionResetError:
@@ -72,11 +74,11 @@ def stat_norm(value: float, denom: float = 255.0) -> float:
 def pokemon_features(pokemon: dict | None) -> list[float]:
     if pokemon is None:
         return [
-            0.0,                         # hp_ratio
-            type_id("normal"),           # type1
-            type_id(None),               # type2
-            status_id("KO"),             # status
-            0.0, 0.0, 0.0, 0.0, 0.0      # atk, def, atkSpe, defSpe, speed
+            0.0,
+            type_id("normal"),
+            type_id(None),
+            status_id("KO"),
+            0.0, 0.0, 0.0, 0.0, 0.0,
         ]
 
     hp = float(pokemon.get("HP", 0.0))
@@ -145,6 +147,11 @@ def json_to_terminated(msg: dict) -> bool:
     return (not p_alive) or (not o_alive)
 
 
+def json_to_invalid_action_flag(msg: dict) -> float:
+    feedback = msg.get("action_feedback", {})
+    return 1.0 if feedback.get("opponent_invalid", False) else 0.0
+
+
 def extract_moves(msg: dict, maximum: int = max_moves, identification: int = locked_id):
     o = msg["opponent_infos"]["opponent_team"][0]
     attacks = o.get("attacks", [])
@@ -187,7 +194,6 @@ def extract_moves(msg: dict, maximum: int = max_moves, identification: int = loc
             dtype=np.float32
         )
 
-        # masque = seulement si PP > 0
         action_mask[slot] = 1 if pp > 0 else 0
 
     compact_names = [n for n, m in zip(move_names, action_mask) if m == 1]

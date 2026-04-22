@@ -1,0 +1,3 @@
+Dans le matchup Pikachu vs Carapuce, l’agent apprend rapidement à exploiter l’avantage de type en privilégiant presque systématiquement l’attaque super efficace.
+Cela montre qu’il est capable, dans un cadre simple, d’identifier et d’utiliser la meilleure attaque offensive.
+En revanche, ce résultat reste limité à un environnement très facile et ne suffit pas encore à prouver une compréhension généralisée des relations d’efficacité entre types.

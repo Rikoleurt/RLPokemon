@@ -1,0 +1,17 @@
+Concrètement, pour un environnement aussi simple, je pense que les 30% de défaites viennent simplement du fait que
+l'adversaire utilise la séquence d'attaque qui lui donne la victoire i.e. tonnerre -> tonnerre -> tonnerre, etc.
+Comme l'adversaire est plus rapide alors il garde l'avantage lorsqu'il execute cette séquence.
+Or, comme il agit aléatoirement, alors le taux de victoire converge naturellement vers ce chiffre.
+
+On observe ainsi un déséquilibre entre les deux adversaires : Pikachu a clairement l'avantage.
+Pourtant, l'agent s'adapte bien et réussi à le reprendre en choisissant tout le temps Poing feu comme attaque.
+
+
+Le duel Salamèche vs Pikachu présente un biais structurel en faveur de Pikachu, principalement lié à son avantage de vitesse, qui lui permet d’agir en premier et d’exploiter plus souvent une séquence offensive gagnante.
+Malgré ce déséquilibre, l’agent contrôlant Salamèche apprend de manière robuste à privilégier Poing feu presque systématiquement.
+Cette politique ne garantit pas la victoire, mais elle améliore nettement les performances et permet de compenser partiellement l’avantage initial de Pikachu.
+
+
+Set up :
+Salamèche avec Poing feu, Flammèche et Charge
+Pikachu avec Poing électrique, Éclair et Charge

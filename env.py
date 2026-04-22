@@ -1,9 +1,10 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-import json, socket
+import json
+import socket
 from collections import deque, defaultdict, Counter
-from data import json_to_obs, json_to_terminated, json_to_action_mask, get_attack_names
+from data import json_to_obs, json_to_terminated, get_attack_names
 
 TYPE_CHART = {
     "normal": {"rock": 0.5, "ghost": 0.0, "steel": 0.5},
@@ -26,12 +27,21 @@ TYPE_CHART = {
     "fairy": {"fire": 0.5, "fighting": 2.0, "poison": 0.5, "dragon": 2.0, "dark": 2.0, "steel": 0.5},
 }
 
+INVALID_ACTION_PENALTY = 0.25
+N_ACTIONS = 6
+ATTACK_ACTIONS = 4
+SWITCH_ACTION = 4
+ITEM_ACTION = 5
+
 
 def get_pokemon_name(pokemon: dict) -> str:
     return pokemon.get("name") or pokemon.get("species") or "unknown"
 
 
 def move_for_action(msg: dict, action: int) -> dict | None:
+    if not (0 <= action < ATTACK_ACTIONS):
+        return None
+
     attacks = msg["opponent_infos"]["opponent_team"][0].get("attacks", [])
     for attack in attacks:
         if attack.get("slot") == action:
@@ -60,13 +70,25 @@ def effectiveness_bucket(move_type: str, defender_type1: str, defender_type2: st
         return "not_very"
     return "neutral"
 
+
 def move_name_for_action(msg: dict, action: int) -> str:
+    if action == SWITCH_ACTION:
+        return "Switch"
+    if action == ITEM_ACTION:
+        return "Item"
+
     attack_names = get_attack_names(msg)
     if 0 <= action < len(attack_names):
         return attack_names[action]
     return f"Attack {action}"
 
-def compute_reward(prev_p, prev_o, new_p, new_o):
+
+def invalid_action_penalty(msg: dict) -> float:
+    feedback = msg.get("action_feedback", {})
+    return INVALID_ACTION_PENALTY if feedback.get("opponent_invalid", False) else 0.0
+
+
+def compute_reward(prev_p, prev_o, new_p, new_o, msg):
     p_max = max(1, new_p["maxHP"])
     o_max = max(1, new_o["maxHP"])
 
@@ -80,7 +102,42 @@ def compute_reward(prev_p, prev_o, new_p, new_o):
     if new_o["status"] == "KO":
         reward -= 1.0
 
+    reward -= invalid_action_penalty(msg)
     return reward
+
+
+def json_to_action_mask(msg: dict) -> np.ndarray:
+    mask = np.zeros((N_ACTIONS,), dtype=np.int8)
+
+    opponent_team = msg["opponent_infos"].get("opponent_team", [])
+    if not opponent_team:
+        return mask
+
+    front = opponent_team[0]
+    attacks = front.get("attacks", [])
+
+    for attack in attacks:
+        slot = attack.get("slot", None)
+        if isinstance(slot, int) and 0 <= slot < ATTACK_ACTIONS:
+            pp = float(attack.get("PP", 0.0))
+            mask[slot] = 1 if pp > 0 else 0
+
+    # Switch possible si un autre Pokémon vivant est disponible
+    if len(opponent_team) > 1:
+        for p in opponent_team[1:]:
+            if p is not None and p.get("status") != "KO":
+                mask[SWITCH_ACTION] = 1
+                break
+
+    # Item possible : on infère depuis le JSON retourné par Java
+    # Comme le sac n'est pas exposé, on utilise le signal métier suivant :
+    # si GameState autorise itemChoice(front), alors l'action sera valide côté Java
+    # Ici on active l'item seulement si le front n'est pas full HP.
+    # Si tu exposes plus tard l'inventaire / un booléen "can_use_item", il faudra le lire ici.
+    if float(front.get("HP", 0.0)) < float(front.get("maxHP", 1.0)):
+        mask[ITEM_ACTION] = 1
+
+    return mask
 
 
 class PokemonEnv(gym.Env):
@@ -88,7 +145,7 @@ class PokemonEnv(gym.Env):
 
     def __init__(self, host="localhost", port=5001, max_turns=200, window_size=100):
         super().__init__()
-        self.current_action_mask = np.ones(4, dtype=bool)
+        self.current_action_mask = np.ones(N_ACTIONS, dtype=bool)
         self.host = host
         self.port = port
         self.last_msg = None
@@ -96,54 +153,49 @@ class PokemonEnv(gym.Env):
         self.window_size = window_size
 
         # Observation = 3 Pokémon visibles * 9 features + 4 scalars + 4 attaques * 7 features = 59
-        type_upper = float(len(TYPE_CHART))  # 18 + sentinelle type2 absent
+        type_upper = float(len(TYPE_CHART))
         status_upper = 10.0
 
         low = np.array(
             [
-                # enemy front
                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                # agent front
                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                # agent back
                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                # context
                 0.0, 0.0, 0.0, 0.0,
-            ] + [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] * 4,
+            ] + [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] * ATTACK_ACTIONS,
             dtype=np.float32,
         )
 
         high = np.array(
             [
-                # enemy front
                 1.0, type_upper, type_upper, status_upper, 1.5, 1.5, 1.5, 1.5, 1.5,
-                # agent front
                 1.0, type_upper, type_upper, status_upper, 1.5, 1.5, 1.5, 1.5, 1.5,
-                # agent back
                 1.0, type_upper, type_upper, status_upper, 1.5, 1.5, 1.5, 1.5, 1.5,
-                # context
                 1.0, float(max_turns), 6.0, 6.0,
-            ] + [255.0, type_upper, 2.0, 1.0, 1.0, 1.0, 1.0] * 4,
+            ] + [255.0, type_upper, 2.0, 1.0, 1.0, 1.0, 1.0] * ATTACK_ACTIONS,
             dtype=np.float32,
         )
 
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
-
-        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
-        self.action_space = spaces.Discrete(4)
+        self.action_space = spaces.Discrete(N_ACTIONS)
 
         self.nb_action0 = 0
         self.nb_action1 = 0
         self.nb_action2 = 0
         self.nb_action3 = 0
-        self.ep_action_counts = np.zeros(4, dtype=np.int32)
+        self.ep_action_counts = np.zeros(N_ACTIONS, dtype=np.int32)
+
+        self.switch_count = 0
+        self.item_count = 0
+        self.invalid_action_count = 0
+
         self.win = 0
         self.total_fights = 0
 
-        self.attack_usage_history = [[] for _ in range(4)]
+        self.attack_usage_history = [[] for _ in range(ATTACK_ACTIONS)]
         self.winrate_history = []
 
-        self.attack_usage_moving_history = [[] for _ in range(4)]
+        self.attack_usage_moving_history = [[] for _ in range(ATTACK_ACTIONS)]
         self.winrate_moving_history = []
 
         self.recent_episode_actions = deque(maxlen=self.window_size)
@@ -191,11 +243,18 @@ class PokemonEnv(gym.Env):
             self.nb_action2 += 1
         elif action == 3:
             self.nb_action3 += 1
+        elif action == SWITCH_ACTION:
+            self.switch_count += 1
+        elif action == ITEM_ACTION:
+            self.item_count += 1
 
         self.ep_action_counts[action] += 1
         self.sock.sendall((str(int(action)) + "\n").encode("utf-8"))
 
     def _record_action_context(self, msg: dict, action: int):
+        if action >= ATTACK_ACTIONS:
+            return
+
         agent_front = msg["opponent_infos"]["opponent_team"][0]
         enemy_front = msg["player_infos"]["player_team"][0]
 
@@ -210,12 +269,7 @@ class PokemonEnv(gym.Env):
         self.global_move_name_counts[move_name] += 1
         self.ep_pokemon_move_name_counts[agent_name][move_name] += 1
 
-        move = None
-        for attack in agent_front.get("attacks", []):
-            if attack.get("slot") == action:
-                move = attack
-                break
-
+        move = move_for_action(msg, action)
         if move is not None:
             move_type = move.get("type", "normal")
             defender_type1 = enemy_front.get("type", "normal")
@@ -226,31 +280,28 @@ class PokemonEnv(gym.Env):
     def _update_episode_stats(self, did_win: bool, fight_length: int):
         self.winrate_history.append(100.0 * self.win / max(1, self.total_fights))
 
-        # usage cumulé global
         global_counts = np.array(
             [self.nb_action0, self.nb_action1, self.nb_action2, self.nb_action3],
             dtype=np.int64,
         )
         total_actions = np.sum(global_counts)
 
-        for i in range(4):
+        for i in range(ATTACK_ACTIONS):
             usage = 100.0 * global_counts[i] / max(1, total_actions)
             self.attack_usage_history[i].append(usage)
 
-        # buffers glissants
         self.recent_episode_actions.append(self.ep_action_counts.copy())
         self.recent_episode_wins.append(1 if did_win else 0)
 
-        # winrate glissant
         moving_winrate = 100.0 * np.mean(self.recent_episode_wins)
         self.winrate_moving_history.append(moving_winrate)
 
-        # usage glissant
-        action_sum = np.sum(np.array(self.recent_episode_actions), axis=0)
-        total_recent_actions = np.sum(action_sum)
+        recent_actions = np.array(self.recent_episode_actions)
+        action_sum = np.sum(recent_actions, axis=0)
+        total_recent_attack_actions = np.sum(action_sum[:ATTACK_ACTIONS])
 
-        for i in range(4):
-            moving_usage = 100.0 * action_sum[i] / max(1, total_recent_actions)
+        for i in range(ATTACK_ACTIONS):
+            moving_usage = 100.0 * action_sum[i] / max(1, total_recent_attack_actions)
             self.attack_usage_moving_history[i].append(moving_usage)
 
         self.fight_length_history.append(fight_length)
@@ -286,7 +337,12 @@ class PokemonEnv(gym.Env):
 
         self.current_action_mask = json_to_action_mask(msg).astype(bool)
 
-        info = {"raw": msg, "action_mask": self.current_action_mask.copy()}
+        info = {
+            "raw": msg,
+            "action_mask": self.current_action_mask.copy(),
+            "opponent_invalid_action": bool(msg.get("action_feedback", {}).get("opponent_invalid", False)),
+            "opponent_invalid_reason": msg.get("action_feedback", {}).get("opponent_invalid_reason", ""),
+        }
         return obs, info
 
     def step(self, action):
@@ -302,7 +358,11 @@ class PokemonEnv(gym.Env):
         prev_p = prev_msg["player_infos"]["player_team"][0]
         prev_o = prev_msg["opponent_infos"]["opponent_team"][0]
 
-        self._record_action_context(prev_msg, action)
+        # Comptage tactique uniquement pour les attaques
+        if action < ATTACK_ACTIONS:
+            self._record_action_context(prev_msg, action)
+
+        # Comptage global + envoi socket
         self._send_action(action)
 
         msg = self._recv_msg()
@@ -312,7 +372,10 @@ class PokemonEnv(gym.Env):
         new_p = msg["player_infos"]["player_team"][0]
         new_o = msg["opponent_infos"]["opponent_team"][0]
 
-        reward = compute_reward(prev_p, prev_o, new_p, new_o)
+        if bool(msg.get("action_feedback", {}).get("opponent_invalid", False)):
+            self.invalid_action_count += 1
+
+        reward = compute_reward(prev_p, prev_o, new_p, new_o, msg)
 
         terminated = json_to_terminated(msg)
         self.turns += 1
@@ -332,6 +395,8 @@ class PokemonEnv(gym.Env):
         info = {
             "raw": msg,
             "action_mask": self.current_action_mask.copy(),
+            "opponent_invalid_action": bool(msg.get("action_feedback", {}).get("opponent_invalid", False)),
+            "opponent_invalid_reason": msg.get("action_feedback", {}).get("opponent_invalid_reason", ""),
         }
 
         self.last_msg = msg

@@ -12,9 +12,9 @@ from matplotlib.ticker import MaxNLocator
 from sb3_contrib import MaskablePPO
 from env import PokemonEnv
 
-MODEL_PATH = "/Users/condreajason/Repositories/RLPokemon/models/SEx4_ppo"
+MODEL_PATH = "/Users/condreajason/Repositories/RLPokemon/models/SE2_ppo"
 TOTAL_TIMESTEPS = 100_000
-TB_LOG_NAME = "pokemon_run_1"
+TB_LOG_NAME = "pokemon_SE2_run_1"
 PLOT_DIR = "/Users/condreajason/Repositories/RLPokemon/plots"
 
 def next_plot_path(plot_dir: str, base_name: str, ext: str = ".png") -> str:
@@ -260,18 +260,69 @@ def plot_pokemon_behavior(env: PokemonEnv, plot_dir: str) -> None:
 def plot_tactical_understanding(env: PokemonEnv, plot_dir: str) -> None:
     path = next_plot_path(plot_dir, "comprehension_tactique")
 
-    fig, axes = plt.subplots(2, 1, figsize=(14, 12))
+    fig, axes = plt.subplots(3, 1, figsize=(14, 16))
 
+    # =========================
+    # 1) Efficacité des attaques
+    # =========================
     labels = ["super efficace", "neutre", "peu efficace"]
     keys = ["super", "neutral", "not_very"]
     values = [env.effectiveness_counts[k] for k in keys]
     effectiveness_colors = ["#4e9f3d", "#8f8f8f", "#d95f02"]
 
-    axes[0].bar(labels, values, color=effectiveness_colors)
+    bars = axes[0].bar(labels, values, color=effectiveness_colors)
     axes[0].set_title("Fréquence super efficace / neutre / pas très efficace")
     axes[0].set_ylabel("Nombre d'actions")
     axes[0].grid(True, axis="y", alpha=0.3)
 
+    total_effectiveness = sum(values)
+    for bar, value in zip(bars, values):
+        if value <= 0:
+            continue
+        pct = 100.0 * value / max(1, total_effectiveness)
+        axes[0].text(
+            bar.get_x() + bar.get_width() / 2,
+            value + max(0.5, total_effectiveness * 0.01),
+            f"{int(value)} ({pct:.1f}%)",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+    # =========================
+    # 2) Usage switch / item / actions invalides
+    # =========================
+    total_attack_actions = sum(env.effectiveness_counts.values())
+    switch_count = getattr(env, "switch_count", 0)
+    item_count = getattr(env, "item_count", 0)
+    invalid_count = getattr(env, "invalid_action_count", 0)
+
+    usage_labels = ["attaques", "switch", "items", "actions invalides"]
+    usage_values = [total_attack_actions, switch_count, item_count, invalid_count]
+    usage_colors = ["#4c78a8", "#72b7b2", "#f28e2b", "#e15759"]
+
+    bars = axes[1].bar(usage_labels, usage_values, color=usage_colors)
+    axes[1].set_title("Usage des mécaniques de jeu")
+    axes[1].set_ylabel("Nombre d'actions")
+    axes[1].grid(True, axis="y", alpha=0.3)
+
+    total_usage = sum(usage_values)
+    for bar, value in zip(bars, usage_values):
+        if value <= 0:
+            continue
+        pct = 100.0 * value / max(1, total_usage)
+        axes[1].text(
+            bar.get_x() + bar.get_width() / 2,
+            value + max(0.5, total_usage * 0.01),
+            f"{int(value)} ({pct:.1f}%)",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+    # =========================
+    # 3) Heatmap attaques par matchup
+    # =========================
     if env.matchup_move_name_counts:
         matchup_names = list(env.matchup_move_name_counts.keys())
         all_move_names = sorted({
@@ -294,14 +345,14 @@ def plot_tactical_understanding(env: PokemonEnv, plot_dir: str) -> None:
         )
         norm = mcolors.Normalize(vmin=0.0, vmax=max(1.0, float(np.max(matrix))))
 
-        im = axes[1].imshow(matrix, aspect="auto", cmap=usage_cmap, norm=norm)
-        axes[1].set_title("Utilisation des attaques par matchup")
-        axes[1].set_xlabel("Attaque")
-        axes[1].set_ylabel("Matchup")
-        axes[1].set_xticks(np.arange(len(all_move_names)))
-        axes[1].set_xticklabels(all_move_names, rotation=45, ha="right")
-        axes[1].set_yticks(np.arange(len(matchup_names)))
-        axes[1].set_yticklabels(matchup_names)
+        im = axes[2].imshow(matrix, aspect="auto", cmap=usage_cmap, norm=norm)
+        axes[2].set_title("Utilisation des attaques par matchup")
+        axes[2].set_xlabel("Attaque")
+        axes[2].set_ylabel("Matchup")
+        axes[2].set_xticks(np.arange(len(all_move_names)))
+        axes[2].set_xticklabels(all_move_names, rotation=45, ha="right")
+        axes[2].set_yticks(np.arange(len(matchup_names)))
+        axes[2].set_yticklabels(matchup_names)
 
         if matrix.size <= 80:
             for row_idx in range(matrix.shape[0]):
@@ -309,7 +360,7 @@ def plot_tactical_understanding(env: PokemonEnv, plot_dir: str) -> None:
                     value = matrix[row_idx, col_idx]
                     normalized = norm(value)
                     text_color = "white" if normalized < 0.25 or normalized > 0.72 else "#222222"
-                    axes[1].text(
+                    axes[2].text(
                         col_idx,
                         row_idx,
                         f"{int(value)}",
@@ -319,12 +370,12 @@ def plot_tactical_understanding(env: PokemonEnv, plot_dir: str) -> None:
                         fontsize=8,
                     )
 
-        colorbar = fig.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
+        colorbar = fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
         colorbar.set_label("Nombre d'utilisations")
     else:
-        axes[1].set_title("Utilisation des attaques par matchup")
-        axes[1].text(0.5, 0.5, "Aucune donnée", ha="center", va="center")
-        axes[1].axis("off")
+        axes[2].set_title("Utilisation des attaques par matchup")
+        axes[2].text(0.5, 0.5, "Aucune donnée", ha="center", va="center")
+        axes[2].axis("off")
 
     fig.tight_layout()
     fig.savefig(path, dpi=200, bbox_inches="tight")

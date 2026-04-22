@@ -1,0 +1,3 @@
+contre un adversaire très favorable à l’agent : il semble apprendre des réflexes corrects de type.
+contre un adversaire très défavorable : cette compréhension ne tient plus vraiment.
+Donc, pour l’instant, il n’a probablement pas appris une représentation robuste du système de types.

@@ -1,0 +1,29 @@
+obs contient 32 features :
+Bloc état global
+
+o_hp : PV normalisés du Pokémon actif de l’agent
+o_type : type du Pokémon actif de l’agent
+o_status : statut du Pokémon actif de l’agent
+p_hp : PV normalisés du Pokémon actif adverse
+p_type : type du Pokémon actif adverse
+p_status : statut du Pokémon actif adverse
+agent_first : 1 si l’agent agit en premier, 0 sinon
+turn : numéro du tour
+
+Bloc attaques du Pokémon actif de l’agent
+
+Pour chaque slot 0..3, tu as 6 features :
+
+move_id
+move_type
+move_mode
+move_power_norm
+move_precision_norm
+move_pp_norm
+
+Donc :
+
+9–14. attaque 0
+15–20. attaque 1
+21–26. attaque 2
+27–32. attaque 3
