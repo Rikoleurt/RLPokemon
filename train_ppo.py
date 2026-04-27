@@ -12,11 +12,12 @@ from matplotlib.ticker import MaxNLocator
 from sb3_contrib import MaskablePPO
 from env import PokemonEnv
 
-MODEL_PATH = "/Users/condreajason/Repositories/RLPokemon/models/SE2_ppo"
+MODEL_PATH = "/Users/condreajason/Repositories/RLPokemon/models/switch_new_ppo"
 TOTAL_TIMESTEPS = 100_000
-TB_LOG_NAME = "pokemon_SE2_run_1"
+TB_LOG_NAME = "pokemon_switch_run_1"
 PLOT_DIR = "/Users/condreajason/Repositories/RLPokemon/plots"
 
+#region helpers
 def next_plot_path(plot_dir: str, base_name: str, ext: str = ".png") -> str:
     plot_dir = Path(plot_dir)
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -97,8 +98,9 @@ def annotate_bar(ax, bar, percentage: float, count: float) -> None:
         ax.text(x, percentage - 3, label, ha="center", va="top", color="white", fontsize=8)
     else:
         ax.text(x, percentage + 2, label, ha="center", va="bottom", color="#222222", fontsize=8)
+#endregion
 
-
+#region Plotting functions
 def plot_global_performance(env: PokemonEnv, plot_dir: str) -> None:
     episodes = np.arange(1, len(env.winrate_history) + 1)
     if episodes.size == 0:
@@ -263,7 +265,7 @@ def plot_tactical_understanding(env: PokemonEnv, plot_dir: str) -> None:
     fig, axes = plt.subplots(3, 1, figsize=(14, 16))
 
     # =========================
-    # 1) Efficacité des attaques
+    # 1) Efficiency of the attacks
     # =========================
     labels = ["super efficace", "neutre", "peu efficace"]
     keys = ["super", "neutral", "not_very"]
@@ -290,7 +292,7 @@ def plot_tactical_understanding(env: PokemonEnv, plot_dir: str) -> None:
         )
 
     # =========================
-    # 2) Usage switch / item / actions invalides
+    # 2) Usage of switch / item / invalid actions
     # =========================
     total_attack_actions = sum(env.effectiveness_counts.values())
     switch_count = getattr(env, "switch_count", 0)
@@ -321,7 +323,7 @@ def plot_tactical_understanding(env: PokemonEnv, plot_dir: str) -> None:
         )
 
     # =========================
-    # 3) Heatmap attaques par matchup
+    # 3) Heatmap of attacks per matchup
     # =========================
     if env.matchup_move_name_counts:
         matchup_names = list(env.matchup_move_name_counts.keys())
@@ -382,11 +384,133 @@ def plot_tactical_understanding(env: PokemonEnv, plot_dir: str) -> None:
     plt.close(fig)
     print(f"Graph saved: {path}")
 
+def plot_terminal_state_summary(env: PokemonEnv, plot_dir: str) -> None:
+    history = getattr(env, "terminal_state_history", [])
+    if not history:
+        return
+
+    path = next_plot_path(plot_dir, "etat_fin_combat")
+
+    rows_data = []
+
+    for side_label, infos_key, team_key in [
+        ("player", "player_infos", "player_team"),
+        ("opponent", "opponent_infos", "opponent_team"),
+    ]:
+        grouped = {}
+
+        for msg in history:
+            team = msg.get(infos_key, {}).get(team_key, [])
+            for idx, pokemon in enumerate(team):
+                if pokemon is None:
+                    continue
+
+                name = pokemon.get("name", f"slot_{idx+1}")
+                key = (side_label, idx + 1, name)
+
+                if key not in grouped:
+                    grouped[key] = {
+                        "episodes_seen": 0,
+                        "alive_count": 0,
+                        "ko_count": 0,
+                        "hp_ratio_sum": 0.0,
+                        "hp_ratio_alive_sum": 0.0,
+                        "alive_hp_samples": 0,
+                        "front_end_count": 0,
+                        "status_counter": Counter(),
+                    }
+
+                g = grouped[key]
+                g["episodes_seen"] += 1
+
+                status = pokemon.get("status", "normal")
+                hp_ratio = float(pokemon.get("hp_ratio", 0.0))
+
+                g["status_counter"][status] += 1
+                g["hp_ratio_sum"] += hp_ratio
+
+                if idx == 0:
+                    g["front_end_count"] += 1
+
+                if status == "KO":
+                    g["ko_count"] += 1
+                else:
+                    g["alive_count"] += 1
+                    g["hp_ratio_alive_sum"] += hp_ratio
+                    g["alive_hp_samples"] += 1
+
+        for (side, slot, name), g in grouped.items():
+            episodes_seen = max(1, g["episodes_seen"])
+            alive_pct = 100.0 * g["alive_count"] / episodes_seen
+            ko_pct = 100.0 * g["ko_count"] / episodes_seen
+            avg_hp_pct = 100.0 * g["hp_ratio_sum"] / episodes_seen
+            avg_alive_hp_pct = (
+                100.0 * g["hp_ratio_alive_sum"] / g["alive_hp_samples"]
+                if g["alive_hp_samples"] > 0 else 0.0
+            )
+            front_end_pct = 100.0 * g["front_end_count"] / episodes_seen
+            most_common_status = g["status_counter"].most_common(1)[0][0]
+
+            rows_data.append([
+                side,
+                str(slot),
+                name,
+                f"{alive_pct:.1f}%",
+                f"{ko_pct:.1f}%",
+                f"{avg_hp_pct:.1f}%",
+                f"{avg_alive_hp_pct:.1f}%",
+                most_common_status,
+                f"{front_end_pct:.1f}%",
+            ])
+
+    rows_data.sort(key=lambda r: (r[0], int(r[1]), r[2]))
+
+    col_labels = [
+        "Camp",
+        "Slot",
+        "Pokémon",
+        "% vivant fin",
+        "% KO fin",
+        "HP moyen fin",
+        "HP moyen si vivant",
+        "Statut final dominant",
+        "% en front fin",
+    ]
+
+    fig_height = max(3.0, 0.45 * (len(rows_data) + 2))
+    fig, ax = plt.subplots(figsize=(14, fig_height))
+    ax.axis("off")
+    ax.set_title("Résumé des états en fin de combat", pad=14)
+
+    table = ax.table(
+        cellText=rows_data,
+        colLabels=col_labels,
+        loc="center",
+        cellLoc="center",
+        colLoc="center",
+    )
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1, 1.35)
+
+    for (row, col), cell in table.get_celld().items():
+        if row == 0:
+            cell.set_text_props(weight="bold")
+            cell.set_facecolor("#d9eaf7")
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Graph saved: {path}")
+#endregion
+
 def plot(env: PokemonEnv, plot_dir: str = PLOT_DIR) -> None:
     os.makedirs(plot_dir, exist_ok=True)
     plot_global_performance(env, plot_dir)
     plot_pokemon_behavior(env, plot_dir)
     plot_tactical_understanding(env, plot_dir)
+    plot_terminal_state_summary(env, plot_dir)
 
 
 def main() -> None:

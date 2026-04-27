@@ -1,0 +1,4 @@
+On a un bon signal concernant l'entraînement. On remarque sur les graphes que les switch ont bien lieu durant les combats.
+Au départ, l'agent garde salamèche sur les terrains. Ceci explique une valeur moyenne de KO de salamèche non égale à 100%.
+Au fur et à mesure de l'entraînement, l'agent switch sur bulbizarre pour éviter le KO de salamèche. Par ailleurs, l'entraînement
+sur le switch n'empêche pas l'apprentissage sur les attaques les plus fortes à disposition de bulbizarre.

@@ -54,7 +54,7 @@ def main():
     except KeyboardInterrupt:
         print("Closing python client")
 
-
+#region helpers
 def type_id(value: str | None) -> float:
     if value is None:
         return float(len(types))
@@ -67,11 +67,30 @@ def status_id(value: str | None) -> float:
     return float(status.get(str(value), 0))
 
 
-def stat_norm(value: float, denom: float = 255.0) -> float:
-    return float(value) / denom
+def stat_norm(value: float, denominator: float = 255.0) -> float:
+    return float(value) / denominator
 
+def get_attack_names(msg: dict, maximum: int = max_moves) -> list[str]:
+    o = msg["opponent_infos"]["opponent_team"][0]
+    attacks = o.get("attacks", [])
 
+    attack_names = [f"Attack {i}" for i in range(maximum)]
+
+    for a in attacks:
+        slot = a.get("slot", None)
+        if isinstance(slot, int) and 0 <= slot < maximum:
+            attack_names[slot] = a.get("name", f"Attack {slot}")
+
+    return attack_names
+
+#endregion
+#region json_data_extract
 def pokemon_features(pokemon: dict | None) -> list[float]:
+    """
+    Get the statistics of a Pokémon.
+    :param pokemon: JSON block representing a Pokémon
+    :return: a list of floats that describes the statistics of a Pokémon
+    """
     if pokemon is None:
         return [
             0.0,
@@ -103,56 +122,7 @@ def pokemon_features(pokemon: dict | None) -> list[float]:
         speed,
     ]
 
-
-def json_to_obs(msg: dict) -> np.ndarray:
-    p_front = msg["player_infos"]["player_team"][0]
-
-    o_team = msg["opponent_infos"]["opponent_team"]
-    o_front = o_team[0]
-    o_back = o_team[1] if len(o_team) > 1 and o_team[1] is not None else None
-
-    agent_first = json_to_agent_first(msg)
-    turn = float(msg.get("turn", 0))
-    enemy_healthy = float(msg["player_infos"].get("healthy_pokemons", 0))
-    agent_healthy = float(msg["opponent_infos"].get("healthy_pokemons", 0))
-
-    _, _, _, move_features = extract_moves(msg)
-
-    obs = np.array(
-        pokemon_features(p_front)
-        + pokemon_features(o_front)
-        + pokemon_features(o_back)
-        + [agent_first, turn, enemy_healthy, agent_healthy]
-        + move_features.flatten().tolist(),
-        dtype=np.float32
-    )
-
-    return obs
-
-
-def json_to_agent_first(msg: dict) -> float:
-    prio = msg.get("Priority", {}).get("name", "")
-    agent_name = msg.get("opponent_infos", {}).get("name", "opponent")
-    return 1.0 if prio == agent_name else 0.0
-
-
-def json_to_action_mask(msg: dict) -> np.ndarray:
-    _, action_mask, _, _ = extract_moves(msg)
-    return action_mask
-
-
-def json_to_terminated(msg: dict) -> bool:
-    p_alive = msg["player_infos"].get("healthy_pokemons", 0) > 0
-    o_alive = msg["opponent_infos"].get("healthy_pokemons", 0) > 0
-    return (not p_alive) or (not o_alive)
-
-
-def json_to_invalid_action_flag(msg: dict) -> float:
-    feedback = msg.get("action_feedback", {})
-    return 1.0 if feedback.get("opponent_invalid", False) else 0.0
-
-
-def extract_moves(msg: dict, maximum: int = max_moves, identification: int = locked_id):
+def get_moves_data_from_json(msg: dict, maximum: int = max_moves, identification: int = locked_id):
     o = msg["opponent_infos"]["opponent_team"][0]
     attacks = o.get("attacks", [])
 
@@ -199,20 +169,53 @@ def extract_moves(msg: dict, maximum: int = max_moves, identification: int = loc
     compact_names = [n for n, m in zip(move_names, action_mask) if m == 1]
     return move_ids, action_mask, compact_names, move_features
 
+def json_to_obs(msg: dict) -> np.ndarray:
+    p_front = msg["player_infos"]["player_team"][0]
 
-def get_attack_names(msg: dict, maximum: int = max_moves) -> list[str]:
-    o = msg["opponent_infos"]["opponent_team"][0]
-    attacks = o.get("attacks", [])
+    o_team = msg["opponent_infos"]["opponent_team"]
+    o_front = o_team[0]
+    o_back = o_team[1] if len(o_team) > 1 and o_team[1] is not None else None
 
-    attack_names = [f"Attack {i}" for i in range(maximum)]
+    agent_first = json_to_agent_first(msg)
+    turn = float(msg.get("turn", 0))
+    enemy_healthy = float(msg["player_infos"].get("healthy_pokemons", 0))
+    agent_healthy = float(msg["opponent_infos"].get("healthy_pokemons", 0))
 
-    for a in attacks:
-        slot = a.get("slot", None)
-        if isinstance(slot, int) and 0 <= slot < maximum:
-            attack_names[slot] = a.get("name", f"Attack {slot}")
+    _, _, _, move_features = get_moves_data_from_json(msg)
 
-    return attack_names
+    obs = np.array(
+        pokemon_features(p_front)
+        + pokemon_features(o_front)
+        + pokemon_features(o_back)
+        + [agent_first, turn, enemy_healthy, agent_healthy]
+        + move_features.flatten().tolist(),
+        dtype=np.float32
+    )
 
+    return obs
+
+
+def json_to_agent_first(msg: dict) -> float:
+    prio = msg.get("Priority", {}).get("name", "")
+    agent_name = msg.get("opponent_infos", {}).get("name", "opponent")
+    return 1.0 if prio == agent_name else 0.0
+
+
+def json_to_action_mask(msg: dict) -> np.ndarray:
+    _, action_mask, _, _ = get_moves_data_from_json(msg)
+    return action_mask
+
+
+def json_to_terminated(msg: dict) -> bool:
+    p_alive = msg["player_infos"].get("healthy_pokemons", 0) > 0
+    o_alive = msg["opponent_infos"].get("healthy_pokemons", 0) > 0
+    return (not p_alive) or (not o_alive)
+
+
+def json_to_invalid_action_flag(msg: dict) -> float:
+    feedback = msg.get("action_feedback", {})
+    return 1.0 if feedback.get("opponent_invalid", False) else 0.0
+#endregion
 
 if __name__ == "__main__":
     main()
