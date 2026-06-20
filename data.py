@@ -49,8 +49,6 @@ switch_action = 4
 item_action = 5
 n_actions = 6
 # endregion
-
-
 # region getters
 # This functions centralizes the JSON access.
 
@@ -465,8 +463,6 @@ def get_action_name(msg: dict, action_id: int) -> str:
     """
     return action_name_for_id(msg, action_id)
 # endregion
-
-
 # region helpers
 def type_id(value: str | None) -> float:
     if value is None:
@@ -626,8 +622,6 @@ def would_stage_move_have_effect(
 
     return True
 # endregion
-
-
 # region action_mask
 def build_action_mask(
     msg: dict,
@@ -665,8 +659,6 @@ def build_action_mask(
 
     return mask
 # endregion
-
-
 # region data processing for env.py
 # This region process the data to later create the obs, truncated and terminated variables.
 def pokemon_features(pokemon: dict | None) -> list[float]:
@@ -747,8 +739,6 @@ def get_moves_data_from_json(
     compact_names = [name for name, mask_value in zip(move_names, action_mask) if mask_value == 1]
     return move_ids, action_mask, compact_names, move_features
 # endregion
-
-
 # region env.py public API
 # These functions are the most important for the env.py file. It gathers the preprocessed data into the obs, truncated
 # and terminated variables.
@@ -810,7 +800,6 @@ def json_to_truncated(msg: dict) -> bool:
 def json_to_invalid_action_flag(msg: dict) -> float:
     return 1.0 if get_opponent_invalid_action(msg) else 0.0
 # endregion
-
 # region client
 def main():
     host = "localhost"
@@ -841,7 +830,5 @@ def main():
     except KeyboardInterrupt:
         print("Closing python client")
 # endregion
-
-
 if __name__ == "__main__":
     main()

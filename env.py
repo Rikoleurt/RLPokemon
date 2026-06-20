@@ -1,12 +1,19 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-import json
-import socket
-from collections import deque, defaultdict, Counter
-from data import json_to_obs, json_to_terminated, get_attack_names
-
-TYPE_CHART = {
+from battle_stat_tracker import BattleStatsTracker
+from client import Client
+from data import (
+    build_action_mask,
+    get_active_matchup,
+    get_enemy_front,
+    json_to_obs,
+    json_to_terminated,
+)
+from matchup_evaluator import MatchupEvaluator
+from reward_calculator import RewardCalculator
+#region Constant
+type_chart = {
     "normal": {"rock": 0.5, "ghost": 0.0, "steel": 0.5},
     "fire": {"fire": 0.5, "water": 0.5, "grass": 2.0, "ice": 2.0, "bug": 2.0, "rock": 0.5, "dragon": 0.5, "steel": 2.0},
     "water": {"fire": 2.0, "water": 0.5, "grass": 0.5, "ground": 2.0, "rock": 2.0, "dragon": 0.5},
@@ -27,11 +34,65 @@ TYPE_CHART = {
     "fairy": {"fire": 0.5, "fighting": 2.0, "poison": 0.5, "dragon": 2.0, "dark": 2.0, "steel": 0.5},
 }
 
-INVALID_ACTION_PENALTY = 0.25
-N_ACTIONS = 6
-ATTACK_ACTIONS = 4
-SWITCH_ACTION = 4
-ITEM_ACTION = 5
+invalid_action_penalty = 0.25
+n_actions = 6
+attack_actions = 4
+switch_action = 4
+item_action = 5
+
+visible_pokemon_slots = 3
+pokemon_feature_count = 9
+battle_scalar_count = 4
+move_feature_count = 7
+observation_size = (
+        visible_pokemon_slots * pokemon_feature_count
+        + battle_scalar_count
+        + attack_actions * move_feature_count
+)
+
+enemy_damage_reward_weight = 1.0
+agent_damage_penalty_weight = 0.5
+step_reward_offset = 0.01
+enemy_ko_reward = 1.0
+agent_ko_penalty = 1.0
+switch_offense_weight = 0.04
+switch_threat_weight = 0.05
+switch_action_cost = 0.05
+bad_switch_penalty = 0.20
+
+#endregion
+
+def build_observation_bounds(max_turns: int) -> tuple[np.ndarray, np.ndarray]:
+    type_upper = float(len(type_chart))
+    status_upper = 10.0
+
+    pokemon_low = [0.0] * pokemon_feature_count
+    pokemon_high = [1.0, type_upper, type_upper, status_upper, 1.5, 1.5, 1.5, 1.5, 1.5]
+
+    battle_low = [0.0] * battle_scalar_count
+    battle_high = [1.0, float(max_turns), 6.0, 6.0]
+
+    move_low = [0.0] * move_feature_count
+    move_high = [255.0, type_upper, 2.0, 1.0, 1.0, 1.0, 1.0]
+
+    low = np.array(
+        pokemon_low * visible_pokemon_slots
+        + battle_low
+        + move_low * attack_actions,
+        dtype=np.float32,
+    )
+    high = np.array(
+        pokemon_high * visible_pokemon_slots
+        + battle_high
+        + move_high * attack_actions,
+        dtype=np.float32,
+    )
+    return low, high
+
+
+def validate_observation_shape(obs: np.ndarray) -> None:
+    expected_shape = (observation_size,)
+    assert obs.shape == expected_shape, f"Expected obs shape {expected_shape}, got {obs.shape}"
 
 
 #region env
@@ -40,510 +101,149 @@ class PokemonEnv(gym.Env):
 
     def __init__(self, host="localhost", port=5001, max_turns=200, window_size=100):
         super().__init__()
-        self.current_action_mask = np.ones(N_ACTIONS, dtype=bool)
+        self.current_action_mask = np.ones(n_actions, dtype=bool)
         self.host = host
         self.port = port
+        self.client = Client(host=host, port=port)
         self.last_msg = None
         self.max_turns = max_turns
         self.window_size = window_size
-
-        # Observation = 3 Pokémon visibles * 9 features + 4 scalars + 4 attaques * 7 features = 59
-        type_upper = float(len(TYPE_CHART))
-        status_upper = 10.0
-
-        low = np.array(
-            [
-                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                0.0, 0.0, 0.0, 0.0,
-            ] + [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0] * ATTACK_ACTIONS,
-            dtype=np.float32,
+        self.matchup_evaluator = MatchupEvaluator(type_chart)
+        self.reward_calculator = RewardCalculator(
+            self.matchup_evaluator,
+            invalid_action_penalty=invalid_action_penalty,
+            switch_action=switch_action,
+            enemy_damage_reward_weight=enemy_damage_reward_weight,
+            agent_damage_penalty_weight=agent_damage_penalty_weight,
+            step_reward_offset=step_reward_offset,
+            enemy_ko_reward=enemy_ko_reward,
+            agent_ko_penalty=agent_ko_penalty,
+            switch_offense_weight=switch_offense_weight,
+            switch_threat_weight=switch_threat_weight,
+            switch_action_cost=switch_action_cost,
+            bad_switch_penalty=bad_switch_penalty,
+        )
+        self.stats_tracker = BattleStatsTracker(
+            window_size,
+            attack_actions=attack_actions,
+            total_actions=n_actions,
+            switch_action=switch_action,
+            item_action=item_action,
         )
 
-        high = np.array(
-            [
-                1.0, type_upper, type_upper, status_upper, 1.5, 1.5, 1.5, 1.5, 1.5,
-                1.0, type_upper, type_upper, status_upper, 1.5, 1.5, 1.5, 1.5, 1.5,
-                1.0, type_upper, type_upper, status_upper, 1.5, 1.5, 1.5, 1.5, 1.5,
-                1.0, float(max_turns), 6.0, 6.0,
-            ] + [255.0, type_upper, 2.0, 1.0, 1.0, 1.0, 1.0] * ATTACK_ACTIONS,
-            dtype=np.float32,
-        )
-
+        low, high = build_observation_bounds(max_turns)
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
-        self.action_space = spaces.Discrete(N_ACTIONS)
+        self.action_space = spaces.Discrete(n_actions)
 
-        self.nb_action0 = 0
-        self.nb_action1 = 0
-        self.nb_action2 = 0
-        self.nb_action3 = 0
-        self.ep_action_counts = np.zeros(N_ACTIONS, dtype=np.int32)
-
-        self.switch_count = 0
-        self.item_count = 0
-        self.invalid_action_count = 0
-
-        self.win = 0
-        self.total_fights = 0
-
-        self.attack_usage_history = [[] for _ in range(ATTACK_ACTIONS)]
-        self.winrate_history = []
-
-        self.attack_usage_moving_history = [[] for _ in range(ATTACK_ACTIONS)]
-        self.winrate_moving_history = []
-
-        self.recent_episode_actions = deque(maxlen=self.window_size)
-        self.recent_episode_wins = deque(maxlen=self.window_size)
-
-        self.fight_length_history = []
-        self.fight_length_moving_history = []
-        self.recent_episode_lengths = deque(maxlen=self.window_size)
-
-        self.effectiveness_counts = {"super": 0, "neutral": 0, "not_very": 0}
-
-        self.pokemon_move_name_counts = defaultdict(Counter)
-        self.matchup_move_name_counts = defaultdict(Counter)
-        self.global_move_name_counts = Counter()
-        self.ep_pokemon_move_name_counts = defaultdict(Counter)
-        self.episode_pokemon_move_name_counts_history = []
-
-        self.terminal_state_history = []
-
-        self.sock = None
-        self.f = None
         self.turns = 0
 
-    def _send_cmd(self, cmd: str):
-        self.sock.sendall((cmd.strip() + "\n").encode("utf-8"))
-
-    def _connect(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((self.host, self.port))
-        self.f = self.sock.makefile("r", encoding="utf-8")
-
-    def _recv_msg(self) -> dict:
-        while True:
-            line = self.f.readline()
-            if not line:
-                raise ConnectionError("Server closed connection")
-            line = line.strip()
-            if line:
-                return json.loads(line)
-
+    # region internal helpers
     def _send_action(self, action: int):
-        if action == 0:
-            self.nb_action0 += 1
-        elif action == 1:
-            self.nb_action1 += 1
-        elif action == 2:
-            self.nb_action2 += 1
-        elif action == 3:
-            self.nb_action3 += 1
-        elif action == SWITCH_ACTION:
-            self.switch_count += 1
-        elif action == ITEM_ACTION:
-            self.item_count += 1
+        self.stats_tracker.record_action(action)
+        self.client.send_action(action)
 
-        self.ep_action_counts[action] += 1
-        self.sock.sendall((str(int(action)) + "\n").encode("utf-8"))
+    def _build_info(self, msg: dict) -> dict:
+        feedback = msg.get("action_feedback", {})
+        return {
+            "raw": msg,
+            "action_mask": self.current_action_mask.copy(),
+            "opponent_invalid_action": bool(feedback.get("opponent_invalid", False)),
+            "opponent_invalid_reason": feedback.get("opponent_invalid_reason", ""),
+        }
 
-    def _record_action_context(self, msg: dict, action: int):
-        if action >= ATTACK_ACTIONS:
+    def _reset_episode_tracking(self):
+        self.turns = 0
+        self.stats_tracker.reset_episode()
+
+    def _set_action_mask(self, msg: dict):
+        self.current_action_mask = build_action_mask(msg).astype(bool)
+
+    def _obs_from_message(self, msg: dict) -> np.ndarray:
+        obs = json_to_obs(msg)
+        validate_observation_shape(obs)
+        return obs
+
+    def _validate_action(self, action_id: int):
+        if not 0 <= action_id < n_actions:
+            raise ValueError(f"Action {action_id} out of bounds for action space size {n_actions}")
+        if not self.current_action_mask[action_id]:
+            raise ValueError(f"Invalid action {action_id} with mask {self.current_action_mask}")
+
+    def _record_action_context(self, msg: dict, action_id: int):
+        if action_id >= attack_actions:
             return
 
-        agent_front = msg["opponent_infos"]["opponent_team"][0]
-        enemy_front = msg["player_infos"]["player_team"][0]
-
-        agent_name = get_pokemon_name(agent_front)
-        enemy_name = get_pokemon_name(enemy_front)
-        matchup_name = f"{agent_name} vs {enemy_name}"
-
-        move_name = action(msg, action)
-
-        self.pokemon_move_name_counts[agent_name][move_name] += 1
-        self.matchup_move_name_counts[matchup_name][move_name] += 1
-        self.global_move_name_counts[move_name] += 1
-        self.ep_pokemon_move_name_counts[agent_name][move_name] += 1
-
-        move = move_for_action(msg, action)
-        if move is not None:
-            move_type = move.get("type", "normal")
-            defender_type1 = enemy_front.get("type", "normal")
-            defender_type2 = enemy_front.get("type2")
-            bucket = effectiveness_to_string(move_type, defender_type1, defender_type2)
-            self.effectiveness_counts[bucket] += 1
-
-    def _update_episode_stats(self, did_win: bool, fight_length: int):
-        self.winrate_history.append(100.0 * self.win / max(1, self.total_fights))
-
-        global_counts = np.array(
-            [self.nb_action0, self.nb_action1, self.nb_action2, self.nb_action3],
-            dtype=np.int64,
-        )
-        total_actions = np.sum(global_counts)
-
-        for i in range(ATTACK_ACTIONS):
-            usage = 100.0 * global_counts[i] / max(1, total_actions)
-            self.attack_usage_history[i].append(usage)
-
-        self.recent_episode_actions.append(self.ep_action_counts.copy())
-        self.recent_episode_wins.append(1 if did_win else 0)
-
-        moving_winrate = 100.0 * np.mean(self.recent_episode_wins)
-        self.winrate_moving_history.append(moving_winrate)
-
-        recent_actions = np.array(self.recent_episode_actions)
-        action_sum = np.sum(recent_actions, axis=0)
-        total_recent_attack_actions = np.sum(action_sum[:ATTACK_ACTIONS])
-
-        for i in range(ATTACK_ACTIONS):
-            moving_usage = 100.0 * action_sum[i] / max(1, total_recent_attack_actions)
-            self.attack_usage_moving_history[i].append(moving_usage)
-
-        self.fight_length_history.append(fight_length)
-        self.recent_episode_lengths.append(fight_length)
-        self.fight_length_moving_history.append(float(np.mean(self.recent_episode_lengths)))
-        self.episode_pokemon_move_name_counts_history.append(
-            {
-                pokemon: Counter(counter)
-                for pokemon, counter in self.ep_pokemon_move_name_counts.items()
-            }
+        self.stats_tracker.record_attack_context(
+            msg,
+            action_id,
+            self.matchup_evaluator,
         )
 
-    def _record_terminal_state(self, msg: dict):
-        self.terminal_state_history.append(msg)
+    def _finalize_episode(self, msg: dict):
+        did_win = get_enemy_front(msg)["status"] == "KO"
+        self.stats_tracker.finalize_episode(did_win, self.turns, msg)
 
+    # endregion
+    # region gymnasium API
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
 
-        if self.sock is None:
-            self._connect()
+        self.client.connect()
+        self.client.reset(seed)
+        self._reset_episode_tracking()
 
-        if seed is None:
-            self._send_cmd("RESET")
-        else:
-            self._send_cmd(f"RESET {int(seed)}")
-
-        self.turns = 0
-        self.ep_action_counts[:] = 0
-        self.ep_pokemon_move_name_counts = defaultdict(Counter)
-
-        msg = self._recv_msg()
+        msg = self.client.receive_message()
         self.last_msg = msg
 
-        obs = json_to_obs(msg)
-        assert obs.shape == (59,), f"Expected obs shape (59,), got {obs.shape}"
-
-        self.current_action_mask = json_to_action_mask(msg).astype(bool)
-
-        info = {
-            "raw": msg,
-            "action_mask": self.current_action_mask.copy(),
-            "opponent_invalid_action": bool(msg.get("action_feedback", {}).get("opponent_invalid", False)),
-            "opponent_invalid_reason": msg.get("action_feedback", {}).get("opponent_invalid_reason", ""),
-        }
-        return obs, info
+        obs = self._obs_from_message(msg)
+        self._set_action_mask(msg)
+        return obs, self._build_info(msg)
 
     def step(self, action):
-        action = int(action)
+        action_id = int(action)
+        self._validate_action(action_id)
 
-        if not self.current_action_mask[action]:
-            raise ValueError(
-                f"Invalid action {action} with mask {self.current_action_mask}"
-            )
+        previous_msg = self.last_msg
+        previous_enemy_front, previous_agent_front = get_active_matchup(previous_msg)
 
-        prev_msg = self.last_msg
+        if action_id < attack_actions:
+            self._record_action_context(previous_msg, action_id)
 
-        prev_p = prev_msg["player_infos"]["player_team"][0]
-        prev_o = prev_msg["opponent_infos"]["opponent_team"][0]
+        self._send_action(action_id)
 
-        if action < ATTACK_ACTIONS:
-            self._record_action_context(prev_msg, action)
+        current_msg = self.client.receive_message()
+        obs = self._obs_from_message(current_msg)
+        current_enemy_front, current_agent_front = get_active_matchup(current_msg)
 
-        self._send_action(action)
+        if bool(current_msg.get("action_feedback", {}).get("opponent_invalid", False)):
+            self.stats_tracker.record_invalid_action()
 
-        msg = self._recv_msg()
-        obs = json_to_obs(msg)
-        assert obs.shape == (59,), f"Expected obs shape (59,), got {obs.shape}"
+        reward = self.reward_calculator.compute_step_reward(
+            previous_enemy_front,
+            previous_agent_front,
+            current_enemy_front,
+            current_agent_front,
+            current_msg,
+            prev_msg=previous_msg,
+            action=action_id,
+        )
 
-        new_p = msg["player_infos"]["player_team"][0]
-        new_o = msg["opponent_infos"]["opponent_team"][0]
-
-        if bool(msg.get("action_feedback", {}).get("opponent_invalid", False)):
-            self.invalid_action_count += 1
-
-        reward = compute_reward(prev_p, prev_o, new_p, new_o, msg, prev_msg=prev_msg, action=action)
-
-        terminated = json_to_terminated(msg)
+        terminated = json_to_terminated(current_msg)
         self.turns += 1
         truncated = self.turns >= self.max_turns
 
         if terminated or truncated:
-            self.total_fights += 1
-            did_win = new_p["status"] == "KO"
+            self._finalize_episode(current_msg)
 
-            if did_win:
-                self.win += 1
+        self._set_action_mask(current_msg)
+        self.last_msg = current_msg
 
-            self._record_terminal_state(msg)
-            self._update_episode_stats(did_win, self.turns)
-
-        self.current_action_mask = json_to_action_mask(msg).astype(bool)
-
-        info = {
-            "raw": msg,
-            "action_mask": self.current_action_mask.copy(),
-            "opponent_invalid_action": bool(msg.get("action_feedback", {}).get("opponent_invalid", False)),
-            "opponent_invalid_reason": msg.get("action_feedback", {}).get("opponent_invalid_reason", ""),
-        }
-
-        self.last_msg = msg
-
-        return obs, float(reward), terminated, truncated, info
+        return obs, float(reward), terminated, truncated, self._build_info(current_msg)
 
     def action_masks(self):
         return self.current_action_mask
 
     def close(self):
-        try:
-            if self.sock:
-                self._send_cmd("DONE")
-        except Exception:
-            pass
-        finally:
-            try:
-                if self.f:
-                    self.f.close()
-                if self.sock:
-                    self.sock.close()
-            finally:
-                self.f = None
-                self.sock = None
-#endregion
-#region helpers
-def get_pokemon_name(pokemon: dict) -> str:
-    return pokemon.get("name") or pokemon.get("species") or "unknown"
-
-def get_stat_block(pokemon: dict) -> dict:
-    return pokemon.get("stats", {})
-
-def get_stab_multiplier(move: dict) -> float:
-    return 1.5 if bool(move.get("isSTAB", False)) else 1.0
-
-def invalid_action_penalty(msg: dict) -> float:
-    feedback = msg.get("action_feedback", {})
-    return INVALID_ACTION_PENALTY if feedback.get("opponent_invalid", False) else 0.0
-
-def incoming_threat_score(enemy: dict, our_pokemon: dict) -> float:
-    return best_attack_score(enemy, our_pokemon)
-
-def move_for_action(msg: dict, action: int) -> dict | None:
-    if not (0 <= action < ATTACK_ACTIONS):
-        return None
-
-    attacks = msg["opponent_infos"]["opponent_team"][0].get("attacks", [])
-    for attack in attacks:
-        if attack.get("slot") == action:
-            return attack
-    return None
-
-def action(msg: dict, action: int) -> str:
-    if action == SWITCH_ACTION:
-        return "Switch"
-    if action == ITEM_ACTION:
-        return "Item"
-
-    attack_names = get_attack_names(msg)
-    if 0 <= action < len(attack_names):
-        return attack_names[action]
-    return f"Attack {action}"
-
-
-def effectiveness_multiplier(move_type: str, defender_type1: str, defender_type2: str | None = None) -> float:
-    move_type = str(move_type).lower()
-    defender_type1 = str(defender_type1).lower()
-
-    mult = TYPE_CHART.get(move_type, {}).get(defender_type1, 1.0)
-
-    if defender_type2 is not None:
-        defender_type2 = str(defender_type2).lower()
-        mult *= TYPE_CHART.get(move_type, {}).get(defender_type2, 1.0)
-
-    return mult
-
-
-def effectiveness_to_string(move_type: str, defender_type1: str, defender_type2: str | None = None) -> str:
-    mult = effectiveness_multiplier(move_type, defender_type1, defender_type2)
-    if mult > 1.0:
-        return "super"
-    if mult < 1.0:
-        return "not_very"
-    return "neutral"
-
-
-
-def offensive_stat(attacker: dict, move: dict) -> float:
-    stats = get_stat_block(attacker)
-    mode = str(move.get("Mode", "status")).lower()
-    if mode == "physical":
-        return float(stats.get("atk", 1.0))
-    if mode == "special":
-        return float(stats.get("atkSpe", 1.0))
-    return 1.0
-
-
-def defensive_stat(defender: dict, move: dict) -> float:
-    stats = get_stat_block(defender)
-    mode = str(move.get("Mode", "status")).lower()
-    if mode == "physical":
-        return float(stats.get("def", 1.0))
-    if mode == "special":
-        return float(stats.get("defSpe", 1.0))
-    return 1.0
-
-
-def estimated_move_score(move: dict, attacker: dict, defender: dict) -> float:
-    mode = str(move.get("Mode", "status")).lower()
-    if mode == "status":
-        return 0.0 # Score must be defined later. First idea: estimate the total damage over the fight, add points also.
-
-    power = float(move.get("Power", 0.0))
-    if power <= 0:
-        return 0.0
-
-    level = float(attacker.get("level", 50))
-    atk = max(1.0, offensive_stat(attacker, move))
-    defense = max(1.0, defensive_stat(defender, move))
-
-    move_type = move.get("type", "normal")
-    defender_type1 = defender.get("type", "normal")
-    defender_type2 = defender.get("type2")
-
-    type_coef = effectiveness_multiplier(move_type, defender_type1, defender_type2)
-    if type_coef == 0.0:
-        return 0.0
-
-    stab = get_stab_multiplier(move)
-    effective_power = power * stab
-
-    raw_damage = ((((level * 0.4 + 2.0) * atk * effective_power) / defense) / 50.0) + 2.0
-    return raw_damage * type_coef # Estimated score for an attack
-
-
-def best_attack_score(attacker: dict, defender: dict) -> float:
-    """
-    Returns the best score over the move pool of the Pokémon. It takes into account the attacker move pool and the
-    defender stats.
-    """
-    attacks = attacker.get("attacks", [])
-    best = 0.0
-    for move in attacks:
-        if float(move.get("PP", 0.0)) <= 0:
-            continue
-        best = max(best, estimated_move_score(move, attacker, defender))
-    return best
-
-def switch_reward(prev_msg: dict, new_msg: dict, action: int) -> float:
-    """
-    We compute the reward for a switch action. The reward is computed as follows:
-    We compute the best attack score for the previous matchup and for the potential new matchup.
-    We also estimate the threat for the previous and the new matchup. We substract the threats and the offenses between
-    them and multiply the result by a coefficient (0.04 for the attack score, 0.05 for the threat score).
-    Safe switches are favored as we lower the reward when bad switch are performed.
-    :param prev_msg: the previous message received from the server
-    :param new_msg: the last message received from the server
-    :param action: the action performed by the agent
-    :return: the reward for a switch action
-    """
-    if action != SWITCH_ACTION:
-        return 0.0
-
-    prev_enemy = prev_msg["player_infos"]["player_team"][0]
-    prev_our_front = prev_msg["opponent_infos"]["opponent_team"][0]
-    new_our_front = new_msg["opponent_infos"]["opponent_team"][0]
-
-    if get_pokemon_name(prev_our_front) == get_pokemon_name(new_our_front):
-        return 0.0
-
-    old_offense = best_attack_score(prev_our_front, prev_enemy)
-    new_offense = best_attack_score(new_our_front, prev_enemy)
-
-    old_threat = incoming_threat_score(prev_enemy, prev_our_front)
-    new_threat = incoming_threat_score(prev_enemy, new_our_front)
-
-    reward = 0.0
-    reward += 0.04 * (new_offense - old_offense)
-    reward += 0.05 * (old_threat - new_threat)
-    reward -= 0.05
-
-    if new_offense <= old_offense and new_threat >= old_threat:
-        reward -= 0.20
-    return reward
-
-def compute_reward(prev_p, prev_o, new_p, new_o, msg, prev_msg=None, action=None):
-    """
-    Computes the total reward for the current step by sequentially adding the rewards (switch and damage for this step)
-    :param prev_p: previous Pokémon of the player
-    :param prev_o: previous Pokémon of the opponent (agent)
-    :param new_p: previous Pokémon of the player
-    :param new_o: previous Pokémon of the opponent (agent)
-    :param msg: the latest message received from the server
-    :param prev_msg: the previous message received from the server
-    :param action: the action performed by the agent
-    :return: the total reward for the current step
-    """
-    p_max = max(1, new_p["maxHP"])
-    o_max = max(1, new_o["maxHP"])
-
-    damage_to_player = (prev_p["HP"] - new_p["HP"]) / p_max
-    damage_to_opponent = (prev_o["HP"] - new_o["HP"]) / o_max
-
-    reward = damage_to_player - 0.5 * damage_to_opponent - 0.01
-
-    # Penalize Pokémon that are KO (to test for a lot of Pokémon)
-    if new_p["status"] == "KO":
-        reward += 1.0
-    if new_o["status"] == "KO":
-        reward -= 1.0
-
-    reward -= invalid_action_penalty(msg) # Penalty for impossible actions
-
-    if prev_msg is not None and action is not None:
-        reward += switch_reward(prev_msg, msg, action) # add the switch reward
-
-    return reward
-
-
-def json_to_action_mask(msg: dict) -> np.ndarray:
-    """
-    Convert the received json into an action mask (numpy array).
-    :param msg:
-    :return:
-    """
-    mask = np.zeros((N_ACTIONS,), dtype=np.int8)
-
-    opponent_team = msg["opponent_infos"].get("opponent_team", [])
-    if not opponent_team:
-        return mask
-
-    front = opponent_team[0]
-    attacks = front.get("attacks", [])
-
-    for attack in attacks:
-        slot = attack.get("slot", None)
-        if isinstance(slot, int) and 0 <= slot < ATTACK_ACTIONS:
-            pp = float(attack.get("PP", 0.0))
-            mask[slot] = 1 if pp > 0 else 0
-
-    if len(opponent_team) > 1:
-        for p in opponent_team[1:]:
-            if p is not None and p.get("status") != "KO":
-                mask[SWITCH_ACTION] = 1
-                break
-
-    if float(front.get("HP", 0.0)) < float(front.get("maxHP", 1.0)): # Must use a checker for Pokémon that can't use an item
-        mask[ITEM_ACTION] = 1
-
-    return mask
+        self.client.close()
+    # endregion
 #endregion
