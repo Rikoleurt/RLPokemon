@@ -43,12 +43,16 @@ statistics = {
     "speed": 5,
 }
 
+statistics_keys = ["atk", "def", "atkSpe", "defSpe", "speed"]
+
 locked_id = 255
 max_moves = 4
 switch_action = 4
 item_action = 5
 n_actions = 6
 # endregion
+
+
 # region getters
 # This functions centralizes the JSON access.
 
@@ -225,6 +229,96 @@ def is_pokemon_alive(pokemon: dict | None) -> bool:
     return pokemon is not None and get_pokemon_status(pokemon) != "KO"
 
 
+# ---------- Bag / item getters ----------
+
+def get_player_bag_data(msg: dict) -> dict:
+    return get_player_infos(msg).get("player_bag_data", {})
+
+
+def get_agent_bag_data(msg: dict) -> dict:
+    """
+    The RL agent is stored in opponent_infos.
+    """
+    return get_agent_infos(msg).get("opponent_bag_data", {})
+
+
+def iter_bag_items(bag_data: dict) -> list[dict]:
+    """
+    Read the Java flat bag format:
+        ["Potion", "HEALTH", 20, 1, ...]
+
+    Each item is represented by 4 consecutive values:
+        name, category, value, count
+    """
+    items = bag_data.get("items", [])
+
+    if not isinstance(items, list) or not items:
+        return []
+
+    if len(items) % 4 != 0:
+        raise ValueError(f"Invalid bag item format: expected groups of 4, got {items}")
+
+    normalized_items = []
+
+    for index in range(0, len(items), 4):
+        name, category, value, count = items[index:index + 4]
+
+        normalized_items.append({
+            "name": str(name),
+            "category": str(category),
+            "value": float(value),
+            "count": int(count),
+        })
+
+    return normalized_items
+
+
+def get_agent_potion_data(msg: dict) -> dict | None:
+    for item in iter_bag_items(get_agent_bag_data(msg)):
+        is_potion = item["name"].lower() == "potion"
+        is_health_item = item["category"].upper() == "HEALTH"
+
+        if is_potion and is_health_item and item["count"] > 0:
+            return item
+
+    return None
+
+
+def agent_has_potion(msg: dict) -> bool:
+    return get_agent_potion_data(msg) is not None
+
+
+def get_agent_potion_count(msg: dict) -> int:
+    potion = get_agent_potion_data(msg)
+    return 0 if potion is None else int(potion["count"])
+
+
+def get_agent_potion_heal(msg: dict) -> float:
+    potion = get_agent_potion_data(msg)
+    return 0.0 if potion is None else float(potion["value"])
+
+
+def can_agent_use_potion(msg: dict, low_hp_threshold: float = 0.5) -> bool:
+    if not agent_has_potion(msg):
+        return False
+
+    agent_front = get_agent_front(msg)
+
+    if not is_pokemon_alive(agent_front):
+        return False
+
+    hp = get_pokemon_hp(agent_front)
+    max_hp = get_pokemon_max_hp(agent_front)
+
+    if hp <= 0.0:
+        return False
+
+    if hp >= max_hp:
+        return False
+
+    return hp < max_hp * low_hp_threshold
+
+
 # ---------- Pokémon stat getters ----------
 
 def get_stat_block(pokemon: dict | None) -> dict:
@@ -372,6 +466,8 @@ def get_move_power(move: dict | None) -> float:
 def get_move_precision(move: dict | None) -> float:
     if move is None:
         return 0.0
+    if "Precision" not in move and has_move_setup_effect(move):
+        return 100.0
     return float(move.get("Precision", 0.0))
 
 
@@ -423,20 +519,54 @@ def get_move_target(move: dict | None) -> str:
     return str(move.get("Target", "none")).lower()
 
 
+def get_move_statistics(move: dict | None) -> list[tuple[str, int]]:
+    if move is None:
+        return []
+
+    result: list[tuple[str, int]] = []
+
+    for change in move.get("StatisticsChange", []):
+        if not isinstance(change, dict):
+            continue
+
+        statistic = change.get("Statistic")
+        stage_delta = change.get("StageDelta", 0)
+
+        if statistic is None:
+            continue
+
+        stage_delta = int(stage_delta)
+        if stage_delta == 0:
+            continue
+
+        result.append((str(statistic), stage_delta))
+
+    return result
+
+
 def get_move_statistic(move: dict | None) -> str | None:
-    if move is None:
-        return None
-    return move.get("Statistic")
+    changes = get_move_statistics(move)
+    return changes[0][0] if changes else None
 
 
-def get_move_stage_delta(move: dict | None) -> int:
-    if move is None:
+def get_move_stage_delta(move: dict | None, statistic: str | None = None) -> int:
+    changes = get_move_statistics(move)
+
+    if not changes:
         return 0
-    return int(move.get("StageDelta", 0))
+
+    if statistic is None:
+        return changes[0][1]
+
+    for current_statistic, stage_delta in changes:
+        if current_statistic == statistic:
+            return stage_delta
+
+    return 0
 
 
-def move_has_stage_effect(move: dict | None) -> bool:
-    return get_move_statistic(move) is not None and get_move_stage_delta(move) != 0
+def has_move_setup_effect(move: dict | None) -> bool:
+    return len(get_move_statistics(move)) > 0
 
 
 # ---------- Action name getters ----------
@@ -463,6 +593,8 @@ def get_action_name(msg: dict, action_id: int) -> str:
     """
     return action_name_for_id(msg, action_id)
 # endregion
+
+
 # region helpers
 def type_id(value: str | None) -> float:
     if value is None:
@@ -503,12 +635,6 @@ def normalized_stage(value: float | int | None) -> float:
 
 
 def move_target(move: dict | None) -> str:
-    """
-    Returns the target of a move.
-
-    Attack and StatusAttack target the opponent by convention.
-    SetUpMove exposes Target directly in JSON.
-    """
     if move is None:
         return "none"
 
@@ -548,13 +674,13 @@ def move_status_probability(move: dict | None) -> float:
     if not move_has_status_effect(move):
         return 0.0
 
-    precision = get_move_precision(move) / 100.0
+    precision = max(0.0, min(1.0, get_move_precision(move) / 100.0))
     mode = str(get_move_mode(move)).lower()
 
     if mode == "status":
         return precision
 
-    return precision * get_move_status_chance(move)
+    return precision * max(0.0, min(1.0, get_move_status_chance(move)))
 
 
 def can_apply_status(move: dict | None) -> bool:
@@ -565,21 +691,15 @@ def can_apply_status(move: dict | None) -> bool:
 
 
 def move_statistic(move: dict | None) -> str | None:
-    value = get_move_statistic(move)
-    if value is None:
-        return None
-    return str(value)
+    return get_move_statistic(move)
 
 
-def move_stage_delta(move: dict | None) -> int:
-    return get_move_stage_delta(move)
+def move_stage_delta(move: dict | None, statistic: str | None = None) -> int:
+    return get_move_stage_delta(move, statistic)
 
 
 def modifies_stat_stage(move: dict | None) -> bool:
-    """
-    True if the move modifies a stat stage.
-    """
-    return move_statistic(move) is not None and move_stage_delta(move) != 0
+    return has_move_setup_effect(move)
 
 
 def stage_move_target_pokemon(
@@ -604,24 +724,26 @@ def would_stage_move_have_effect(
     enemy_front: dict | None,
 ) -> bool:
     """
-    False if the stat stage is already capped at -6 or +6.
+    True if at least one stat modified by the move is not already capped.
     """
-    if not modifies_stat_stage(move):
-        return False
-
-    statistic = move_statistic(move)
-    delta = move_stage_delta(move)
     target_pokemon = stage_move_target_pokemon(move, agent_front, enemy_front)
-    current_stage = get_stat_stage(target_pokemon, statistic)
 
-    if delta > 0 and current_stage >= 6:
+    if target_pokemon is None:
         return False
 
-    if delta < 0 and current_stage <= -6:
-        return False
+    for statistic, delta in get_move_statistics(move):
+        current_stage = get_stat_stage(target_pokemon, statistic)
 
-    return True
+        if delta > 0 and current_stage < 6:
+            return True
+
+        if delta < 0 and current_stage > -6:
+            return True
+
+    return False
 # endregion
+
+
 # region action_mask
 def build_action_mask(
     msg: dict,
@@ -636,17 +758,44 @@ def build_action_mask(
         4: switch action
         5: item action
     """
+
     mask = np.zeros((total_actions,), dtype=np.int8)
 
     agent_team = get_agent_team(msg)
     agent_front = get_agent_front(msg)
+    enemy_front = get_enemy_front(msg)
+    enemy_status = get_pokemon_status(enemy_front)
+
     if agent_front is None:
         return mask
 
     for move in get_agent_moves(msg):
         slot = get_move_slot(move)
-        if 0 <= slot < attack_actions:
-            mask[slot] = 1 if get_move_pp(move) > 0 else 0
+
+        if not (0 <= slot < attack_actions):
+            continue
+
+        valid = get_move_pp(move) > 0
+        mode = str(get_move_mode(move)).lower()
+
+        is_pure_status_move = (
+            mode == "status"
+            and get_move_status(move) is not None
+        )
+
+        if valid and is_pure_status_move and enemy_status != "normal":
+            valid = False
+
+        is_pure_setup_move = (
+            mode == "status"
+            and has_move_setup_effect(move)
+            and get_move_status(move) is None
+        )
+
+        if valid and is_pure_setup_move:
+            valid = would_stage_move_have_effect(move, agent_front, enemy_front)
+
+        mask[slot] = 1 if valid else 0
 
     if len(agent_team) > 1:
         for pokemon in agent_team[1:]:
@@ -654,13 +803,24 @@ def build_action_mask(
                 mask[switch_slot] = 1
                 break
 
-    if get_pokemon_hp(agent_front) < get_pokemon_max_hp(agent_front):
+    if can_agent_use_potion(msg):
         mask[item_slot] = 1
+
+    if np.any(mask):
+        return mask
+
+    # When every move is out of PP, the battle can still continue via the
+    # simulator's fallback behavior. Returning an all-zero mask deadlocks PPO.
+    for move in get_agent_moves(msg):
+        slot = get_move_slot(move)
+        if 0 <= slot < attack_actions:
+            mask[slot] = 1
 
     return mask
 # endregion
+
+
 # region data processing for env.py
-# This region process the data to later create the obs, truncated and terminated variables.
 def pokemon_features(pokemon: dict | None) -> list[float]:
     """
     Get the statistics of a Pokémon.
@@ -675,6 +835,7 @@ def pokemon_features(pokemon: dict | None) -> list[float]:
             type_id(None),
             status_id("KO"),
             0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 0.0,
         ]
 
     return [
@@ -687,6 +848,11 @@ def pokemon_features(pokemon: dict | None) -> list[float]:
         stat_norm(get_pokemon_atk_spe(pokemon)),
         stat_norm(get_pokemon_def_spe(pokemon)),
         stat_norm(get_pokemon_speed(pokemon)),
+        normalized_stage(get_stat_stage(pokemon, "atk")),
+        normalized_stage(get_stat_stage(pokemon, "def")),
+        normalized_stage(get_stat_stage(pokemon, "atkSpe")),
+        normalized_stage(get_stat_stage(pokemon, "defSpe")),
+        normalized_stage(get_stat_stage(pokemon, "speed")),
     ]
 
 
@@ -701,9 +867,29 @@ def get_moves_data_from_json(
     action_mask = np.zeros((maximum,), dtype=np.int8)
     move_names = [""] * maximum
 
-    # [id, type_id, mode_id, power_norm, precision_norm, pp_norm, is_stab]
-    move_features = np.zeros((maximum, 7), dtype=np.float32)
+    # [
+    #   id,
+    #   type_id,
+    #   mode_id,
+    #   power_norm,
+    #   precision_norm,
+    #   pp_norm,
+    #   is_stab,
+    #   status_id,
+    #   status_probability,
+    #   target_id,
+    #   atk_delta_norm,
+    #   def_delta_norm,
+    #   atkSpe_delta_norm,
+    #   defSpe_delta_norm,
+    #   speed_delta_norm,
+    #   stage_effect_possible,
+    # ]
+    move_features = np.zeros((maximum, 16), dtype=np.float32)
     move_features[:, 0] = float(identification)
+
+    agent_front = get_agent_front(msg)
+    enemy_front = get_enemy_front(msg)
 
     for attack in attacks:
         slot = get_move_slot(attack)
@@ -720,6 +906,21 @@ def get_moves_data_from_json(
         pp_norm = get_move_pp_ratio(attack)
         is_stab = 1.0 if get_move_is_stab(attack) else 0.0
 
+        move_status_id = status_id(move_status_effect(attack))
+        status_probability = move_status_probability(attack)
+        move_target_id = target_id(move_target(attack))
+
+        atk_delta_norm = normalized_stage(get_move_stage_delta(attack, "atk"))
+        def_delta_norm = normalized_stage(get_move_stage_delta(attack, "def"))
+        atk_spe_delta_norm = normalized_stage(get_move_stage_delta(attack, "atkSpe"))
+        def_spe_delta_norm = normalized_stage(get_move_stage_delta(attack, "defSpe"))
+        speed_delta_norm = normalized_stage(get_move_stage_delta(attack, "speed"))
+        stage_effect_possible = 1.0 if would_stage_move_have_effect(
+            attack,
+            agent_front,
+            enemy_front,
+        ) else 0.0
+
         move_ids[slot] = move_id
         move_names[slot] = move_name
         move_features[slot] = np.array(
@@ -731,6 +932,15 @@ def get_moves_data_from_json(
                 precision_norm,
                 pp_norm,
                 is_stab,
+                move_status_id,
+                status_probability,
+                move_target_id,
+                atk_delta_norm,
+                def_delta_norm,
+                atk_spe_delta_norm,
+                def_spe_delta_norm,
+                speed_delta_norm,
+                stage_effect_possible,
             ],
             dtype=np.float32,
         )
@@ -739,6 +949,8 @@ def get_moves_data_from_json(
     compact_names = [name for name, mask_value in zip(move_names, action_mask) if mask_value == 1]
     return move_ids, action_mask, compact_names, move_features
 # endregion
+
+
 # region env.py public API
 # These functions are the most important for the env.py file. It gathers the preprocessed data into the obs, truncated
 # and terminated variables.
@@ -777,8 +989,7 @@ def json_to_action_mask(msg: dict) -> np.ndarray:
 
     Use build_action_mask(msg) when a full 6-action mask is needed.
     """
-    _, action_mask, _, _ = get_moves_data_from_json(msg)
-    return action_mask
+    return build_action_mask(msg)[:max_moves]
 
 
 def json_to_terminated(msg: dict) -> bool:
@@ -800,6 +1011,8 @@ def json_to_truncated(msg: dict) -> bool:
 def json_to_invalid_action_flag(msg: dict) -> float:
     return 1.0 if get_opponent_invalid_action(msg) else 0.0
 # endregion
+
+
 # region client
 def main():
     host = "localhost"
@@ -830,5 +1043,7 @@ def main():
     except KeyboardInterrupt:
         print("Closing python client")
 # endregion
+
+
 if __name__ == "__main__":
     main()

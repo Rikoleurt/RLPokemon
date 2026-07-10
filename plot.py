@@ -372,6 +372,97 @@ def plot_tactical_understanding(env: PokemonEnv, plot_dir: str) -> None:
     print(f"Graph saved: {path}")
 
 
+def plot_move_type_and_utility_usage(env: PokemonEnv, plot_dir: str) -> None:
+    tracker = env.stats_tracker
+    path = next_plot_path(plot_dir, "utilisation_status_setup")
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 15))
+
+    move_labels = ["attack", "status", "setup"]
+    move_colors = ["#4c78a8", "#59a14f", "#f28e2b"]
+    move_counts = [tracker.move_category_counter[label] for label in move_labels]
+    _plot_distribution_bars(
+        axes[0],
+        move_labels,
+        move_counts,
+        "Utilisation des categories de moves",
+        "% des moves selectionnes",
+        "Aucun move selectionne",
+        move_colors,
+    )
+
+    status_labels = [
+        "paralyzed",
+        "burned",
+        "freeze",
+        "confused",
+        "poisoned",
+        "badlyPoisoned",
+        "asleep",
+    ]
+    status_colors = ["#7b6fd0", "#e15759", "#76b7b2", "#b07aa1", "#59a14f", "#2f855a", "#9c755f"]
+    status_counts = [tracker.status_inflicted_counter[label] for label in status_labels]
+    _plot_distribution_bars(
+        axes[1],
+        status_labels,
+        status_counts,
+        "Status inflicted",
+        "% of status inflicted",
+        "No status inflicted",
+        status_colors,
+    )
+
+    stat_labels = ["atk", "def", "atkSpe", "defSpe", "speed"]
+    stat_colors = ["#e15759", "#4e79a7", "#f28e2b", "#76b7b2", "#59a14f"]
+    stat_counts = [tracker.setup_stat_boost_counter[label] for label in stat_labels]
+    _plot_distribution_bars(
+        axes[2],
+        stat_labels,
+        stat_counts,
+        "Successful boosts",
+        "% of statistical boosts",
+        "No successful boost",
+        stat_colors,
+    )
+
+    axes[-1].set_xlabel("Categories")
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Graph saved: {path}")
+
+
+def _plot_distribution_bars(
+    ax,
+    labels: list[str],
+    counts: list[int],
+    title: str,
+    ylabel: str,
+    empty_message: str,
+    colors: list[str],
+) -> None:
+    total = float(sum(counts))
+    x = np.arange(len(labels))
+
+    if total <= 0.0:
+        ax.bar(x, np.zeros(len(labels), dtype=float), color=colors, alpha=0.35)
+        ax.text(0.5, 0.5, empty_message, ha="center", va="center", transform=ax.transAxes)
+        ax.set_ylim(0, 100)
+    else:
+        percentages = 100.0 * np.asarray(counts, dtype=float) / total
+        bars = ax.bar(x, percentages, color=colors)
+        for bar, percentage, count in zip(bars, percentages, counts):
+            annotate_bar(ax, bar, percentage, count)
+        ax.set_ylim(0, min(105, max(35.0, float(np.max(percentages)) + 15.0)))
+
+    ax.set_title(title)
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.grid(True, axis="y", alpha=0.3)
+
+
 def plot_terminal_state_summary(env: PokemonEnv, plot_dir: str) -> None:
     tracker = env.stats_tracker
     history = tracker.final_history
@@ -439,6 +530,9 @@ def plot_terminal_state_summary(env: PokemonEnv, plot_dir: str) -> None:
             )
             front_end_pct = 100.0 * grouped_stats["front_end_count"] / episodes_seen
             most_common_status = grouped_stats["status_counter"].most_common(1)[0][0]
+            healed_hp = 0.0
+            if side == "opponent":
+                healed_hp = float(getattr(tracker, "healed_hp_by_pokemon", {}).get(name, 0.0))
 
             rows_data.append([
                 side,
@@ -448,6 +542,7 @@ def plot_terminal_state_summary(env: PokemonEnv, plot_dir: str) -> None:
                 f"{ko_pct:.1f}%",
                 f"{avg_hp_pct:.1f}%",
                 f"{avg_alive_hp_pct:.1f}%",
+                f"{healed_hp:.0f}",
                 most_common_status,
                 f"{front_end_pct:.1f}%",
             ])
@@ -462,12 +557,13 @@ def plot_terminal_state_summary(env: PokemonEnv, plot_dir: str) -> None:
         "% KO fin",
         "HP moyen fin",
         "HP moyen si vivant",
+        "HP soigne",
         "Statut final dominant",
         "% en front fin",
     ]
 
     fig_height = max(3.0, 0.45 * (len(rows_data) + 2))
-    fig, ax = plt.subplots(figsize=(14, fig_height))
+    fig, ax = plt.subplots(figsize=(16, fig_height))
     ax.axis("off")
     ax.set_title("Resume des etats en fin de combat", pad=14)
 
@@ -499,5 +595,6 @@ def plot(env: PokemonEnv, plot_dir: str) -> None:
     plot_global_performance(env, plot_dir)
     plot_pokemon_behavior(env, plot_dir)
     plot_tactical_understanding(env, plot_dir)
+    plot_move_type_and_utility_usage(env, plot_dir)
     plot_terminal_state_summary(env, plot_dir)
 #endregion

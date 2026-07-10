@@ -4,15 +4,38 @@ import numpy as np
 
 from data import (
     action_name_for_id,
+    can_apply_status,
     get_agent_front,
     get_enemy_front,
+    get_move_mode,
+    get_move_power,
+    get_pokemon_hp,
+    get_pokemon_max_hp,
     get_pokemon_name,
+    get_pokemon_status,
+    get_stat_stage,
+    get_agent_potion_heal,
+    modifies_stat_stage,
     move_for_action_id,
+    get_move_statistics,
+    move_target,
 )
+
+move_categories = ("attack", "status", "setup")
+status = (
+    "paralyzed",
+    "burned",
+    "freeze",
+    "confused",
+    "poisoned",
+    "badlyPoisoned",
+    "asleep",
+)
+statistics = ("atk", "def", "atkSpe", "defSpe", "speed")
 
 
 def get_move_usage_context(
-        msg: dict,
+    msg: dict,
     action_id: int,
     agent_front: dict | None,
     enemy_front: dict | None,
@@ -70,6 +93,12 @@ class BattleStatsTracker:
         self.global_move_counter = Counter()
         self.episode_pokemon_move_counter = defaultdict(Counter)
         self.pokemon_move_counter_history_by_episode = []
+        self.move_category_counter = Counter({category: 0 for category in move_categories})
+        self.episode_move_category_counter = Counter({category: 0 for category in move_categories})
+        self.move_category_history_by_episode = []
+        self.status_inflicted_counter = Counter({status_name: 0 for status_name in status})
+        self.setup_stat_boost_counter = Counter({stat_name: 0 for stat_name in statistics})
+        self.healed_hp_by_pokemon = defaultdict(float)
 
         self.final_history = []
 
@@ -77,6 +106,7 @@ class BattleStatsTracker:
     def reset_episode(self):
         self.episode_action_counts[:] = 0
         self.episode_pokemon_move_counter = defaultdict(Counter)
+        self.episode_move_category_counter = Counter({category: 0 for category in move_categories})
 
     def record_action(self, action_id: int):
         if 0 <= action_id < self.attack_actions:
@@ -109,6 +139,58 @@ class BattleStatsTracker:
 
         self._record_move_usage(agent_name, matchup_name, move_name)
         self._record_move_effectiveness(msg, action_id, enemy_front, matchup_evaluator)
+        self.record_move_category(msg, action_id)
+
+    def get_move_category(self, move: dict | None) -> str:
+        if modifies_stat_stage(move):
+            return "setup"
+        if self._is_pure_status_move(move):
+            return "status"
+        return "attack"
+
+    def record_move_category(self, msg: dict, action_id: int):
+        move = move_for_action_id(msg, action_id)
+        if move is None:
+            return
+
+        category = self.get_move_category(move)
+        self.move_category_counter[category] += 1
+        self.episode_move_category_counter[category] += 1
+
+    def record_move_outcome(
+        self,
+        previous_msg: dict,
+        current_msg: dict,
+        action_id: int,
+    ):
+        move = move_for_action_id(previous_msg, action_id)
+        if move is None:
+            return
+
+        previous_enemy_front = get_enemy_front(previous_msg)
+        previous_agent_front = get_agent_front(previous_msg)
+        current_enemy_front = get_enemy_front(current_msg)
+        current_agent_front = get_agent_front(current_msg)
+
+        self.record_status_inflicted(previous_enemy_front, current_enemy_front, move)
+        self.record_setup_stat_boost(previous_agent_front, current_agent_front, move)
+
+    def record_item_heal(self, previous_msg: dict, current_msg: dict):
+        previous_agent_front = get_agent_front(previous_msg)
+        if previous_agent_front is None:
+            return
+
+        potion_heal = get_agent_potion_heal(previous_msg)
+        if potion_heal <= 0.0:
+            return
+
+        missing_hp = max(0.0, get_pokemon_max_hp(previous_agent_front) - get_pokemon_hp(previous_agent_front))
+        healed_hp = min(potion_heal, missing_hp)
+        if healed_hp <= 0.0:
+            return
+
+        agent_name = get_pokemon_name(previous_agent_front)
+        self.healed_hp_by_pokemon[agent_name] += healed_hp
 
     def finalize_episode(self, did_win: bool, fight_length: int, terminal_msg: dict):
         self.total_fights += 1
@@ -149,6 +231,62 @@ class BattleStatsTracker:
             enemy_front.get("type2"),
         )
         self.effectiveness_counter[bucket] += 1
+
+    def record_status_inflicted(
+        self,
+        previous_enemy_front: dict | None,
+        current_enemy_front: dict | None,
+        move: dict | None,
+    ):
+        if not can_apply_status(move):
+            return
+
+        previous_status = get_pokemon_status(previous_enemy_front)
+        current_status = get_pokemon_status(current_enemy_front)
+
+        if previous_status != "normal":
+            return
+        if current_status == "KO" or current_status not in status:
+            return
+
+        self.status_inflicted_counter[current_status] += 1
+
+    def record_setup_stat_boost(
+        self,
+        previous_agent_front: dict | None,
+        current_agent_front: dict | None,
+        move: dict | None,
+    ):
+        if not modifies_stat_stage(move):
+            return
+        if move_target(move) != "self":
+            return
+
+        for statistic, delta in get_move_statistics(move):
+            if statistic not in statistics or delta <= 0:
+                continue
+
+            previous_stage = get_stat_stage(previous_agent_front, statistic)
+            current_stage = get_stat_stage(current_agent_front, statistic)
+            if current_stage <= previous_stage:
+                continue
+
+            self.setup_stat_boost_counter[statistic] += 1
+
+    def _is_damaging_move(self, move: dict | None) -> bool:
+        if move is None:
+            return False
+
+        mode = str(get_move_mode(move)).lower()
+        power = get_move_power(move)
+        return mode in ("physical", "special") or power > 0
+
+    def _is_pure_status_move(self, move: dict | None) -> bool:
+        return (
+            can_apply_status(move)
+            and not self._is_damaging_move(move)
+            and not modifies_stat_stage(move)
+        )
     # endregion
 
     # region Episode outcome
@@ -193,4 +331,5 @@ class BattleStatsTracker:
                 for pokemon, counter in self.episode_pokemon_move_counter.items()
             }
         )
+        self.move_category_history_by_episode.append(Counter(self.episode_move_category_counter))
     # endregion

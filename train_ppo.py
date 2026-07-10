@@ -5,9 +5,9 @@ from sb3_contrib import MaskablePPO
 from env import PokemonEnv
 from plot import plot
 
-MODEL_PATH = "/Users/condreajason/Repositories/RLPokemon/models/switch_new_ppo"
+MODEL_PATH = "/Users/condreajason/Repositories/RLPokemon/models/model"
 TOTAL_TIMESTEPS = 100_000
-TB_LOG_NAME = "pokemon_switch_run_1"
+TB_LOG_NAME = "pokemon_run_1"
 PLOT_DIR = "/Users/condreajason/Repositories/RLPokemon/plots"
 TENSORBOARD_LOG_DIR = "./tensorboard_logs/"
 

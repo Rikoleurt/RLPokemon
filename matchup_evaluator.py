@@ -2,6 +2,8 @@ def get_stab_multiplier(move: dict) -> float:
     return 1.5 if bool(move.get("isSTAB", False)) else 1.0
 
 def offensive_stat(attacker: dict, move: dict) -> float:
+    if attacker is None:
+        return 1.0
     stats = attacker.get("stats", {})
     mode = str(move.get("Mode", "status")).lower()
     if mode == "physical":
@@ -12,6 +14,8 @@ def offensive_stat(attacker: dict, move: dict) -> float:
 
 
 def defensive_stat(defender: dict, move: dict) -> float:
+    if defender is None:
+        return 1.0
     stats = defender.get("stats", {})
     mode = str(move.get("Mode", "status")).lower()
     if mode == "physical":
@@ -54,6 +58,8 @@ class MatchupEvaluator:
         return "neutral"
 
     def estimated_move_score(self, move: dict, attacker: dict, defender: dict) -> float:
+        if attacker is None or defender is None:
+            return 0.0
         mode = str(move.get("Mode", "status")).lower()
         if mode == "status":
             return 0.0
@@ -81,6 +87,8 @@ class MatchupEvaluator:
         return raw_damage * multiplier
 
     def best_attack_score(self, attacker: dict, defender: dict) -> float:
+        if attacker is None or defender is None:
+            return 0.0
         best_score = 0.0
         for move in attacker.get("attacks", []):
             if float(move.get("PP", 0.0)) <= 0:

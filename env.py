@@ -41,9 +41,9 @@ switch_action = 4
 item_action = 5
 
 visible_pokemon_slots = 3
-pokemon_feature_count = 9
+pokemon_feature_count = 14
 battle_scalar_count = 4
-move_feature_count = 7
+move_feature_count = 16
 observation_size = (
         visible_pokemon_slots * pokemon_feature_count
         + battle_scalar_count
@@ -65,15 +65,36 @@ bad_switch_penalty = 0.20
 def build_observation_bounds(max_turns: int) -> tuple[np.ndarray, np.ndarray]:
     type_upper = float(len(type_chart))
     status_upper = 10.0
-
-    pokemon_low = [0.0] * pokemon_feature_count
-    pokemon_high = [1.0, type_upper, type_upper, status_upper, 1.5, 1.5, 1.5, 1.5, 1.5]
+    mode_upper = 2.0
+    target_upper = 2.0
+    pokemon_low = [
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0,
+        -1.0, -1.0, -1.0, -1.0, -1.0,
+    ]
+    pokemon_high = [
+        1.0, type_upper, type_upper, status_upper,
+        1.5, 1.5, 1.5, 1.5, 1.5,
+        1.0, 1.0, 1.0, 1.0, 1.0,
+    ]
 
     battle_low = [0.0] * battle_scalar_count
     battle_high = [1.0, float(max_turns), 6.0, 6.0]
 
-    move_low = [0.0] * move_feature_count
-    move_high = [255.0, type_upper, 2.0, 1.0, 1.0, 1.0, 1.0]
+    move_low = [
+        0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0,
+        -1.0, -1.0, -1.0, -1.0, -1.0,
+        0.0,
+    ]
+    move_high = [
+        255.0, type_upper, mode_upper,
+        1.0, 1.0, 1.0, 1.0,
+        status_upper, 1.0, target_upper,
+        1.0, 1.0, 1.0, 1.0, 1.0,
+        1.0,
+    ]
 
     low = np.array(
         pokemon_low * visible_pokemon_slots
@@ -113,6 +134,7 @@ class PokemonEnv(gym.Env):
             self.matchup_evaluator,
             invalid_action_penalty=invalid_action_penalty,
             switch_action=switch_action,
+            item_action=item_action,
             enemy_damage_reward_weight=enemy_damage_reward_weight,
             agent_damage_penalty_weight=agent_damage_penalty_weight,
             step_reward_offset=step_reward_offset,
@@ -214,6 +236,13 @@ class PokemonEnv(gym.Env):
         current_msg = self.client.receive_message()
         obs = self._obs_from_message(current_msg)
         current_enemy_front, current_agent_front = get_active_matchup(current_msg)
+
+        if action_id < attack_actions:
+            self.stats_tracker.record_move_outcome(
+                previous_msg,
+                current_msg,
+                action_id,
+            )
 
         if bool(current_msg.get("action_feedback", {}).get("opponent_invalid", False)):
             self.stats_tracker.record_invalid_action()
