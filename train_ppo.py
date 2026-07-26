@@ -1,14 +1,12 @@
-from importlib.util import find_spec
-
 import gymnasium as gym
 from sb3_contrib import MaskablePPO
 from env import PokemonEnv
 from plot import plot
 
-MODEL_PATH = "/Users/condreajason/Repositories/RLPokemon/models/model"
-TOTAL_TIMESTEPS = 100_000
-TB_LOG_NAME = "pokemon_run_1"
-PLOT_DIR = "/Users/condreajason/Repositories/RLPokemon/plots"
+MODEL_PATH = "/Users/condreajason/Repositories/RLPokemon/models/global_random_matchups_ppo"
+TOTAL_TIMESTEPS = 2_000_000
+TB_LOG_NAME = "pokemon_global_random_matchups"
+PLOT_DIR = "/Users/condreajason/Repositories/RLPokemon/plots/global_random_matchups"
 TENSORBOARD_LOG_DIR = "./tensorboard_logs/"
 
 def main() -> None:
